@@ -1,9 +1,10 @@
 # QuakeTrack
 
 Global Earthquake Data Engineering & Analytics Pipeline. `PROJECT.md` is the primary
-specification. **Phases 1, 2 and 3 are implemented.** Historical extraction, validation,
+specification. **Phases 1-4 are implemented.** Historical extraction, validation,
 quarantine, repeatable staging, PostgreSQL loading, migrations and analytical SQL
-work. Airflow and the Streamlit dashboard belong to later phases.
+work. Airflow orchestration, incremental coverage and monitoring are verified.
+The Phase 5 Streamlit dashboard has not been started.
 
 ## Local setup (PowerShell)
 
@@ -141,8 +142,8 @@ Integration tests explicitly create an isolated test DB; development is never re
 .\.venv\Scripts\python -m pytest --database-tests -q --basetemp=.pytest_tmp/db-check
 ```
 
-The role needs CREATEDB to run those tests. Default pytest runs the 88 offline tests
-and skips 22 database tests. The verified full run passed all 110. Real development
+The role needs CREATEDB to run those tests. Default pytest runs 96 offline tests
+and skips 29 database tests. The verified full run passed all 125. Real development
 loading inserted 37 events; repeat and offline replay each reported 37 unchanged.
 
 See [database schema and operations](docs/database.md) for tables, constraints,
@@ -157,8 +158,7 @@ Changing `.env` does not rotate existing PostgreSQL passwords. Use administratio
 commands for role changes. For an existing database, configure its host/port and
 credentials instead of starting Compose. Future containers will use host `postgres`.
 
-Phase 3 is complete. Phase 4 requires approval and will add Airflow scheduling,
-incremental orchestration and operational recovery. Phase 5 adds the dashboard.
+Phases 1-4 are complete. Phase 5 requires approval and will add the dashboard.
 No ML or prediction is included.
 
 - [Implementation plan](docs/implementation_plan.md)
@@ -169,3 +169,35 @@ No ML or prediction is included.
 
 - [Database schema and operations](docs/database.md)
 - [Phase 3 report](docs/phase3_report.md)
+
+## Phase 4 Airflow
+
+The pinned Linux Airflow 3.3.2 runtime uses LocalExecutor and its own PostgreSQL
+metadata DB. The application DB stays on localhost:55432. The UI is available at
+http://localhost:18080 (admin; password is AIRFLOW_ADMIN_PASSWORD in local .env).
+
+```powershell
+.\.venv\Scripts\python scripts/setup_airflow.py
+.\.venv\Scripts\python -m quaketrack.cli migrate
+docker compose --profile airflow build airflow
+docker compose --profile airflow up -d airflow
+# Enable the configured hourly schedule when ready:
+docker compose exec airflow airflow dags unpause quaketrack_earthquake_ingestion
+# Stop Airflow services without deleting any volumes or stopping the app DB:
+docker compose --profile airflow stop airflow airflow-db
+```
+
+The DAG is left paused after verification; its hourly schedule is configured.
+catchup=False prevents historical scheduler backfill. First automatic coverage is
+6 hours, followed by a configurable overlap up to 72 hours and bounded catch-up.
+Only successful PostgreSQL loading PLUS post-load quality advances pipeline_state.
+Manual historical test windows do not change automatic coverage. Failure simulation
+is disabled. Do not delete existing database volumes.
+
+See [Airflow operations](docs/airflow.md) for bounded manual triggering, task logs,
+retries, restart safety, all settings and troubleshooting. Six real DAG runs succeeded;
+one controlled quality failure recovered on its second attempt without refetching.
+Three current real events were inserted, bringing the total to 40; the original
+37 were unchanged. Application tests passed 125 cases plus 3 real DAG checks.
+
+- [Phase 4 report](docs/phase4_report.md)

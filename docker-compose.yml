@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-quaketrack_app}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
-      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -14,5 +14,85 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+  airflow-db:
+    image: postgres:16-alpine
+    profiles: [airflow]
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_METADATA_PASSWORD:-}
+    volumes:
+      - airflow_metadata:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U airflow -d airflow']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  airflow:
+    build:
+      context: .
+      dockerfile: docker/airflow/Dockerfile
+    profiles: [airflow]
+    init: true
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-quaketrack}
+      POSTGRES_USER: ${POSTGRES_USER:-quaketrack_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      USGS_API_BASE_URL: ${USGS_API_BASE_URL:-https://earthquake.usgs.gov/fdsnws/event/1/query}
+      USGS_MIN_MAGNITUDE: ${USGS_MIN_MAGNITUDE:-2.5}
+      USGS_EVENT_TYPE: ${USGS_EVENT_TYPE:-earthquake}
+      USGS_REQUEST_TIMEOUT_SECONDS: ${USGS_REQUEST_TIMEOUT_SECONDS:-30}
+      USGS_MAX_RETRIES: ${USGS_MAX_RETRIES:-3}
+      USGS_RETRY_BACKOFF_SECONDS: ${USGS_RETRY_BACKOFF_SECONDS:-1}
+      USGS_REQUEST_LIMIT: ${USGS_REQUEST_LIMIT:-1000}
+      BACKFILL_WINDOW_DAYS: ${BACKFILL_WINDOW_DAYS:-1}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AIRFLOW_METADATA_PASSWORD: ${AIRFLOW_METADATA_PASSWORD:-}
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN_CMD: python /workspace/scripts/airflow_connection.py
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/auth_passwords.json
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-}
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__CORE__PARALLELISM: 2
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: admin:admin
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: 'false'
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://localhost:8080/execution/
+      AIRFLOW__API__WORKERS: 1
+      PIPELINE_SCHEDULE: ${PIPELINE_SCHEDULE:-0 * * * *}
+      AIRFLOW_TASK_RETRY_SECONDS: ${AIRFLOW_TASK_RETRY_SECONDS:-60}
+      INCREMENTAL_LOOKBACK_HOURS: ${INCREMENTAL_LOOKBACK_HOURS:-72}
+      INCREMENTAL_BOOTSTRAP_HOURS: ${INCREMENTAL_BOOTSTRAP_HOURS:-6}
+      INCREMENTAL_STEP_HOURS: ${INCREMENTAL_STEP_HOURS:-6}
+      INGESTION_DELAY_MINUTES: ${INGESTION_DELAY_MINUTES:-10}
+      ALLOW_FAILURE_SIMULATION: ${ALLOW_FAILURE_SIMULATION:-false}
+      RAW_ARCHIVE_DIR: /workspace/data/raw
+      QUARANTINE_DIR: /workspace/data/quarantine
+      STAGING_DIR: /workspace/data/staging
+    ports:
+      - '127.0.0.1:${AIRFLOW_WEB_PORT:-18080}:8080'
+    volumes:
+      - airflow_home:/opt/airflow
+      - ./dags:/opt/airflow/dags:ro
+      - ./src:/workspace/src:ro
+      - ./sql:/workspace/sql:ro
+      - ./scripts:/workspace/scripts:ro
+      - ./data:/workspace/data
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import json,urllib.request; h=json.load(urllib.request.urlopen('http://localhost:8080/api/v2/monitor/health',timeout=5)); assert all(h[k]['status']=='healthy' for k in ('metadatabase','scheduler','dag_processor'))"]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 60s
 volumes:
   postgres_data:
+  airflow_metadata:
+  airflow_home:

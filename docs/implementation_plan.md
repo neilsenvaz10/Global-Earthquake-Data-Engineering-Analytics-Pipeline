@@ -12,7 +12,7 @@ PROJECT.md remains the source of truth and is unchanged.
    deterministic deduplication and unit tests. No database loading yet.
 3. **Phase 3 (completed):** migrations, transactional revision-aware upserts, indexes, analytical
    queries, integrity and repeat-load integration tests.
-4. **Phase 4:** Airflow deployment in a supported Linux/container Python runtime,
+4. **Phase 4 (completed):** Airflow deployment in a supported Linux/container Python runtime,
    hourly incremental updates, 72-hour lookback, checkpoints, run metrics and recovery.
 5. **Phase 5:** PostgreSQL-backed Streamlit/Plotly dashboard, end-to-end testing,
    reproducible deployment, screenshots and demo documentation.
@@ -50,3 +50,12 @@ Added explicit SQL migrations, PostgreSQL repository/loading, offline raw replay
 separate DB checkpoints and analytical queries. All 110 tests passed, including
 22 tests in a new isolated database. The 37 real Phase 2 events were loaded and
 verified in development. No Airflow or dashboard was implemented.
+
+## Phase 4 verification
+
+Pinned Airflow 3.3.2 with isolated metadata DB and LocalExecutor is running. All six
+bounded live DAG runs succeeded. The suite passed 125 application/DB cases plus
+3 real DAG checks. Scope-specific durable incremental coverage, quality-gated
+checkpoint advancement, retry recovery and persistent restart were verified.
+The hourly DAG is left paused and failure simulation is disabled. Phase 5 has not
+started and requires explicit approval. See phase4_report.md and airflow.md.

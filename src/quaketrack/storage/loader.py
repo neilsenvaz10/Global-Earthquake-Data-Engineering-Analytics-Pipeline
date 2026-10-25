@@ -34,7 +34,7 @@ def failure_detail(error):
     return f"{type(error).__name__}: {error}" if isinstance(error, (ValueError, KeyError)) else type(error).__name__
 
 
-def load_staging(engine, staging_dir, *, replay=False, resume=False, batch_size=500):
+def load_staging(engine, staging_dir, *, replay=False, resume=False, batch_size=500, scope_to_staging=False):
     """Each successful window is one transaction, including events and provenance.
 
     A fresh run row records every load invocation, including repeated loads. Resume
@@ -77,9 +77,13 @@ def load_staging(engine, staging_dir, *, replay=False, resume=False, batch_size=
                 skipped = False
                 with engine.begin() as connection:
                     connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": WRITER_LOCK})
-                    prior = connection.execute(select(func.count()).select_from(chunks).where(
+                    prior_query = select(func.count()).select_from(chunks).where(
                         chunks.c.checkpoint_key == key, chunks.c.input_sha256 == digest,
-                        chunks.c.status == "success")).scalar_one()
+                        chunks.c.status == "success")
+                    if scope_to_staging:
+                        prior_query = prior_query.where(chunks.c.run_id.in_(
+                            select(runs.c.run_id).where(runs.c.staging_path == str(root))))
+                    prior = connection.execute(prior_query).scalar_one()
                     current_chunk["attempt_count"] = connection.execute(select(func.count()).select_from(chunks).where(
                         chunks.c.checkpoint_key == key)).scalar_one() + 1
                     if resume and prior:

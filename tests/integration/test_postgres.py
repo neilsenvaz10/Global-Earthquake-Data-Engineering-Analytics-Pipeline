@@ -67,7 +67,7 @@ def db(isolated_engine):
     # Only synthetic data in THIS session's freshly created database is reset.
     assert database_identity(isolated_engine)["database"].startswith("quaketrack_test_")
     with isolated_engine.begin() as connection:
-        connection.exec_driver_sql("TRUNCATE rejected_events, raw_archives, earthquakes, ingestion_chunks, ingestion_runs")
+        connection.exec_driver_sql("TRUNCATE pipeline_state, rejected_events, raw_archives, earthquakes, ingestion_chunks, ingestion_runs")
     return isolated_engine
 
 
@@ -104,7 +104,7 @@ def test_migrations_repeat_and_checksum_guard(db, tmp_path):
     assert apply_migrations(db)["applied"] == []
     require_migrations(db)
     with db.connect() as connection:
-        assert connection.execute(text("SELECT COUNT(*) FROM schema_migrations")).scalar_one() == 3
+        assert connection.execute(text("SELECT COUNT(*) FROM schema_migrations")).scalar_one() == len(list(MIGRATION_DIR.glob("*.sql")))
         assert connection.execute(text("SELECT COUNT(*) FROM earthquakes")).scalar_one() == 1
     for source in MIGRATION_DIR.glob("*.sql"):
         (tmp_path / source.name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
@@ -117,12 +117,12 @@ def test_migrations_repeat_and_checksum_guard(db, tmp_path):
 def test_migration_transaction_rolls_back_pending_files(db, tmp_path):
     for source in MIGRATION_DIR.glob("*.sql"):
         (tmp_path / source.name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-    (tmp_path / "004_bad.sql").write_text("CREATE TABLE mock_should_rollback(id INT); SELECT 1/0;")
+    (tmp_path / "005_bad.sql").write_text("CREATE TABLE mock_should_rollback(id INT); SELECT 1/0;")
     with pytest.raises(DBAPIError):
         apply_migrations(db, tmp_path)
     with db.connect() as connection:
         assert connection.execute(text("SELECT to_regclass('public.mock_should_rollback')")).scalar_one() is None
-        assert connection.execute(text("SELECT COUNT(*) FROM schema_migrations")).scalar_one() == 3
+        assert connection.execute(text("SELECT COUNT(*) FROM schema_migrations")).scalar_one() == len(list(MIGRATION_DIR.glob("*.sql")))
 
 
 @pytest.mark.parametrize("bad", [
@@ -339,3 +339,119 @@ def test_interrupted_database_load_resumes_only_failed_window(db, tmp_path, monk
     report = load_staging(db, settings.staging_dir, resume=True)
     assert report["chunks_skipped"] == 1 and report["chunks_completed"] == 1
     assert report["counts"]["inserted"] == 1
+
+
+def workflow_settings(tmp_path):
+    return replace(load_settings(), archive_dir=tmp_path / "raw", staging_dir=tmp_path / "workflow",
+                   quarantine_dir=tmp_path / "quarantine", max_retries=0)
+
+
+def workflow_client(settings, rows=None, error=None):
+    client = USGSClient(settings, retries=0, sleep=Mock())
+    response = requests.Response()
+    response.status_code = 200
+    response.url = settings.api_url + "?mock-only=true"
+    response._content = json.dumps({"type": "FeatureCollection", "features": rows or []}).encode()
+    client.session.get = Mock(side_effect=error) if error else Mock(return_value=response)
+    return client
+
+
+def test_workflow_success_checkpoint_and_duplicate_execution(db, tmp_path):
+    from quaketrack.orchestration import plan_run, execute_plan
+    settings = workflow_settings(tmp_path)
+    plan = plan_run(settings, db, "mock-auto", end="2020-01-01T06:10:00Z")
+    assert execute_plan(settings, db, plan, client=workflow_client(settings, [feature()]))["status"] == "success"
+    with db.connect() as c:
+        state = c.execute(text("SELECT * FROM pipeline_state")).mappings().one()
+        assert state["last_successful_window_end"] == datetime(2020,1,1,6,tzinfo=timezone.utc)
+        parent = c.execute(text("SELECT * FROM ingestion_runs WHERE execution_key='mock-auto'")).mappings().one()
+        assert parent["status"] == "success" and parent["quality_status"] == "passed"
+        assert parent["records_inserted"] == 1
+    client = workflow_client(settings, error=AssertionError("duplicate execution cannot fetch"))
+    assert execute_plan(settings, db, plan, client=client)["duplicate_execution"]
+
+
+def test_workflow_api_failure_then_retry_and_empty_success(db, tmp_path):
+    from quaketrack.orchestration import plan_run, execute_plan
+    settings = workflow_settings(tmp_path)
+    plan = plan_run(settings, db, "mock-api-retry", end="2020-01-01T06:10:00Z")
+    with pytest.raises(requests.Timeout):
+        execute_plan(settings, db, plan, client=workflow_client(settings, error=requests.Timeout()))
+    with db.connect() as c:
+        assert c.execute(text("SELECT COUNT(*) FROM pipeline_state")).scalar_one() == 0
+        assert c.execute(text("SELECT api_failures FROM ingestion_runs WHERE execution_key='mock-api-retry'")).scalar_one() == 1
+    execute_plan(settings, db, plan, client=workflow_client(settings, []))
+    with db.connect() as c:
+        parent = c.execute(text("SELECT * FROM ingestion_runs WHERE execution_key='mock-api-retry'")).mappings().one()
+        assert parent["status"] == "success" and parent["records_fetched"] == 0
+        assert c.execute(text("SELECT COUNT(*) FROM pipeline_state")).scalar_one() == 1
+
+
+def test_quality_failure_does_not_advance_and_retry_reuses_data(db, tmp_path, monkeypatch):
+    import quaketrack.orchestration as workflow
+    settings = workflow_settings(tmp_path)
+    plan = workflow.plan_run(settings, db, "mock-quality-retry", end="2020-01-01T06:10:00Z")
+    original = workflow.check_quality
+    monkeypatch.setattr(workflow, "check_quality", Mock(side_effect=ValueError("mock quality failure")))
+    with pytest.raises(ValueError):
+        workflow.execute_plan(settings, db, plan, client=workflow_client(settings, [feature()]))
+    with db.connect() as c:
+        assert c.execute(text("SELECT COUNT(*) FROM pipeline_state")).scalar_one() == 0
+        assert c.execute(text("SELECT quality_failures FROM ingestion_runs WHERE execution_key='mock-quality-retry'")).scalar_one() == 1
+    monkeypatch.setattr(workflow, "check_quality", original)
+    workflow.execute_plan(settings, db, plan, client=workflow_client(settings, error=AssertionError("must reuse archive")))
+    with db.connect() as c:
+        assert c.execute(text("SELECT records_inserted FROM ingestion_runs WHERE execution_key='mock-quality-retry'")).scalar_one() == 1
+
+
+def test_workflow_database_failure_recovery(db, tmp_path, monkeypatch):
+    import quaketrack.orchestration as workflow
+    settings = workflow_settings(tmp_path)
+    plan = workflow.plan_run(settings, db, "mock-db-retry", end="2020-01-01T06:10:00Z")
+    original = workflow.load_staging
+    monkeypatch.setattr(workflow, "load_staging", Mock(side_effect=RuntimeError("mock database outage")))
+    with pytest.raises(RuntimeError):
+        workflow.execute_plan(settings, db, plan, client=workflow_client(settings, [feature()]))
+    with db.connect() as c:
+        assert c.execute(text("SELECT COUNT(*) FROM pipeline_state")).scalar_one() == 0
+        assert c.execute(text("SELECT database_failures FROM ingestion_runs WHERE execution_key='mock-db-retry'")).scalar_one() == 1
+    monkeypatch.setattr(workflow, "load_staging", original)
+    workflow.execute_plan(settings, db, plan, client=workflow_client(settings, error=AssertionError("must reuse extraction")))
+
+
+def test_workflow_manual_no_automatic_checkpoint_and_bad_archive(db, tmp_path):
+    from quaketrack.orchestration import plan_run, execute_plan, check_quality
+    settings = workflow_settings(tmp_path)
+    plan = plan_run(settings, db, "mock-manual", start=START, end="2020-01-02")
+    execute_plan(settings, db, plan, client=workflow_client(settings, [feature()]))
+    with db.connect() as c:
+        assert c.execute(text("SELECT COUNT(*) FROM pipeline_state")).scalar_one() == 0
+    data = json.loads(Path(plan).read_text())
+    root = Path(data["directory"]) / "staging"
+    checkpoint = next(iter(load_state(root)["checkpoints"].values()))
+    Path(checkpoint["archives"][0]["path"]).write_bytes(b"mock corruption")
+    with pytest.raises(ValueError, match="checksum"):
+        check_quality(db, root, data)
+
+
+def test_identical_responses_in_separate_workflows_keep_provenance(db, tmp_path):
+    from quaketrack.orchestration import plan_run, execute_plan
+    settings = workflow_settings(tmp_path)
+    for key in ("mock-identical-first", "mock-identical-second"):
+        plan = plan_run(settings, db, key, start=START, end="2020-01-02")
+        assert execute_plan(settings, db, plan, client=workflow_client(settings, [feature()]))["status"] == "success"
+    with db.connect() as connection:
+        rows = connection.execute(text("SELECT records_inserted,records_unchanged FROM ingestion_runs WHERE execution_key IS NOT NULL ORDER BY started_at")).all()
+        assert rows == [(1,0),(0,1)]
+
+
+def test_controlled_failure_once_recovers_without_http(db, tmp_path, monkeypatch):
+    from quaketrack.orchestration import plan_run, execute_plan
+    settings = workflow_settings(tmp_path)
+    monkeypatch.setenv("ALLOW_FAILURE_SIMULATION", "true")
+    plan = plan_run(settings, db, "mock-failure-once", start=START, end="2020-01-02", simulate_failure_once=True)
+    with pytest.raises(RuntimeError, match="Controlled quality-stage"):
+        execute_plan(settings, db, plan, client=workflow_client(settings, [feature()]))
+    assert execute_plan(settings, db, plan, client=workflow_client(settings, error=AssertionError("no refetch")))["status"] == "success"
+    with db.connect() as connection:
+        assert connection.execute(text("SELECT quality_failures FROM ingestion_runs WHERE execution_key='mock-failure-once'")).scalar_one() == 1
