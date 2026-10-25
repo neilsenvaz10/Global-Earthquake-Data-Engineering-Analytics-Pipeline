@@ -1,1 +1,1 @@
-"""QuakeTrack environment and source verification (Phase 1)."""
+"""QuakeTrack historical earthquake extraction and validated staging."""

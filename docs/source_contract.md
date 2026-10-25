@@ -24,7 +24,7 @@ feeds for applications displaying current events; this project uses catalog quer
 for historical and revision-aware analytics. No undocumented request-rate quota is
 assumed. Bounded retries, backoff and Retry-After support are Phase 2 work.
 
-## Future normalized record v1 (documented, not implemented)
+## Normalized record v1 (implemented in Phase 2)
 
 | Field | Type / source / rule |
 |---|---|
@@ -41,8 +41,8 @@ assumed. Bounded retries, backoff and Retry-After support are Phase 2 work.
 
 GeoJSON coordinate order is longitude, latitude, depth (km). Do not invent values
 for missing fields. Occurrence, source update and ingestion timestamps are distinct.
-Invalid IDs/times/coordinates will be rejected in Phase 2; duplicate IDs will prefer
-the newest source revision. Storage provenance fields and migrations belong to Phase 3.
+Invalid IDs/times/coordinates are quarantined in Phase 2; duplicate IDs prefer
+the newest valid source revision under the policy in etl_operations.md. Storage provenance fields and migrations belong to Phase 3.
 
 USGS-produced information is generally public domain in the United States; linked
 third-party materials can carry separate rights. Attribute USGS, preserve source URLs
@@ -58,3 +58,14 @@ First source ID: ci41341279; magnitude 3.08; coordinates
 Occurrence: 2026-10-01T00:01:59.630000+00:00.
 Source update: 2026-10-21T00:56:54.040000+00:00.
 These were inspected directly from the archived source, without loading curated rows.
+
+## Phase 2 extensions
+
+Normalized records also retain nullable magnitude_type (magType), event_status
+(status), network (net), source_code (code), source_ids (ids), source_networks
+(sources), detail_url (detail), and the source label USGS. Event type is required.
+Optional null measurements are retained; malformed present values are quarantined.
+Normalized timestamps are UTC ISO8601 strings for JSON staging; the future loader
+will bind them to PostgreSQL TIMESTAMPTZ. See etl_operations.md for revision ties,
+half-open windows, adaptive extraction limits and count definitions. The old
+Phase 1 sample checker remains capped and separate from complete-window ETL.

@@ -4,10 +4,10 @@ The initial repository contained only PROJECT.md (untracked) and a one-line READ
 No application, environment template, dependencies, tests, or deployment existed.
 PROJECT.md remains the source of truth and is unchanged.
 
-1. **Phase 1 (current):** package and local environment, centralized environment configuration,
+1. **Phase 1 (completed):** package and local environment, centralized environment configuration,
    UTC logging, bounded historical connectivity sample with provenance, read-only PostgreSQL
    check, database-only Compose service, offline smoke tests, source contract and setup guide.
-2. **Phase 2 (requires explicit approval):** reusable extractor with bounded retries,
+2. **Phase 2 (completed):** reusable extractor with bounded retries,
    historical windows, replayable archives, normalization, validation, quarantine,
    deterministic deduplication and unit tests. No database loading yet.
 3. **Phase 3:** migrations, transactional revision-aware upserts, indexes, analytical
@@ -35,3 +35,10 @@ PROJECT.md remains the source of truth and is unchanged.
 - Relative archive paths resolve against the project root; process variables override .env.
 - Future backfill defaults (12 months), lookback (72 hours), retries and schedule
   will be added when used; Phase 1 does not pretend these settings already run a pipeline.
+
+## Phase 2 verification
+
+Phase 2 was explicitly authorized and is complete. It reuses Phase 1 configuration,
+logging and dependencies, adds local staging for repeat/resume checks, and leaves
+PostgreSQL loading for Phase 3. See phase2_report.md for 88 passing tests and bounded
+real-data results. Phase 3 still requires explicit approval.

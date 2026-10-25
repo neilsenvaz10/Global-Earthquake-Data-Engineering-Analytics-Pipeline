@@ -8,5 +8,6 @@ __pycache__/
 !.env.example
 data/raw/
 data/quarantine/
+data/staging/
 logs/
 .pytest_tmp/
