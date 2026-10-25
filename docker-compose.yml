@@ -92,6 +92,27 @@ services:
       timeout: 10s
       retries: 15
       start_period: 60s
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/dashboard/Dockerfile
+    profiles: [dashboard]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-quaketrack}
+      POSTGRES_USER: ${POSTGRES_USER:-quaketrack_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    ports:
+      - '127.0.0.1:${STREAMLIT_PORT:-8501}:8501'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; assert urllib.request.urlopen('http://localhost:8501/_stcore/health',timeout=5).status == 200"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
 volumes:
   postgres_data:
   airflow_metadata:

@@ -57,5 +57,12 @@ Pinned Airflow 3.3.2 with isolated metadata DB and LocalExecutor is running. All
 bounded live DAG runs succeeded. The suite passed 125 application/DB cases plus
 3 real DAG checks. Scope-specific durable incremental coverage, quality-gated
 checkpoint advancement, retry recovery and persistent restart were verified.
-The hourly DAG is left paused and failure simulation is disabled. Phase 5 has not
-started and requires explicit approval. See phase4_report.md and airflow.md.
+The hourly DAG is left paused and failure simulation is disabled. Phase 5 was
+subsequently authorized; see phase5_report.md for the dashboard and final checks.
+
+## Phase 5 verification
+
+Five Streamlit/Plotly views now share read-only, parameterized database filters.
+The final report records automated tests, live page checks, a bounded DAG test,
+preservation hashes, actual coverage and local deployment commands. No large
+backfill or unattended ingestion was enabled. Changes remain uncommitted.

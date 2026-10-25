@@ -79,6 +79,71 @@ def create_run(engine):
     return run_id
 
 
+def test_dashboard_query_filters_csv_and_readonly(db):
+    import csv
+    import io
+    from datetime import date
+    from quaketrack.dashboard.data import DashboardData, Filters, dashboard_engine
+    run_id = create_run(db)
+    records = [normalize_feature(feature("negative", mag=-1, depth=-2)),
+               normalize_feature(feature("unknown", mag=None, depth=None)),
+               normalize_feature(feature("positive", mag=4, depth=100)),
+               normalize_feature(feature("end-boundary", at=EPOCH + 86400000, mag=5))]
+    with db.begin() as connection:
+        upsert_events(connection, records, run_id)
+        connection.execute(text("UPDATE earthquakes SET place_description='Japan 100%_!' WHERE event_id='negative'"))
+    data = DashboardData(db)
+    filters = Filters.dates(date(2020, 1, 1), date(2020, 1, 1))
+    assert data.overview(filters)["total"] == 3
+    assert data.coverage()["total"] == 4
+    with db.begin() as connection:
+        connection.execute(text("UPDATE earthquakes SET event_type='quarry blast' WHERE event_id='end-boundary'"))
+    assert data.coverage()["total"] == 3
+    assert data.overview(Filters.dates(date(2020, 1, 2), date(2020, 1, 2)))["total"] == 0
+    assert data.overview(filters)["unknown_magnitude"] == 1
+    assert sum(row["events"] for row in data.timeline(filters)) == 3
+    for interval in ("week", "month"):
+        assert sum(row["events"] for row in data.timeline(filters, interval)) == 3
+    negative = replace(filters, min_magnitude=-2, max_magnitude=0, min_depth=-3, max_depth=0, include_unknown=False)
+    assert data.events(negative)[0]["event_id"] == "negative"
+    assert len(data.events(replace(negative, include_unknown=True))) == 2
+    assert len(data.events(replace(filters, location="100%_!"))) == 1
+    assert not data.events(replace(filters, location="' OR 1=1 --"))
+    assert data.events(filters, sort="Magnitude", limit=1)[0]["event_id"] == "positive"
+    assert len(data.events(filters, limit=1, offset=1)) == 1
+    assert sum(r["events"] for r in data.distribution(filters)) == 3
+    assert sum(r["events"] for r in data.distribution(filters, "depth_km")) == 3
+    rows = list(csv.DictReader(io.StringIO(data.export(negative).decode("utf-8-sig"))))
+    assert len(rows) == 1 and rows[0]["magnitude"] == "-1.0"
+    assert data.monitoring()["workflows"] == [] and len(data.monitoring()["loads"]) == 1
+    readonly = dashboard_engine(replace(load_settings(), db_name=db.url.database))
+    try:
+        with readonly.begin() as connection:
+            assert connection.exec_driver_sql("SHOW transaction_read_only").scalar_one() == "on"
+            with pytest.raises(DBAPIError):
+                connection.exec_driver_sql("DELETE FROM earthquakes")
+    finally:
+        readonly.dispose()
+    assert data.coverage()["total"] == 3
+
+
+def test_dashboard_empty_and_rejects_invalid_query_controls(db):
+    from datetime import date
+    from quaketrack.dashboard.data import DashboardData, Filters
+    data = DashboardData(db)
+    filters = Filters.dates(date(2020, 1, 1), date(2020, 1, 1))
+    assert data.coverage()["total"] == 0 and data.overview(filters)["avg_depth"] is None
+    assert data.events(filters) == [] and data.timeline(filters) == []
+    assert data.monitoring()["last_success"] is None
+    for kwargs in (dict(limit=0), dict(limit=10001), dict(offset=-1), dict(sort="DROP TABLE earthquakes")):
+        with pytest.raises(ValueError):
+            data.events(filters, **kwargs)
+    with pytest.raises(ValueError):
+        data.timeline(filters, "invalid")
+    with pytest.raises(ValueError):
+        data.distribution(filters, "invalid")
+
+
 def stage(tmp_path, rows_per_window):
     settings = replace(load_settings(), archive_dir=tmp_path / "raw", staging_dir=tmp_path / "stage",
                        quarantine_dir=tmp_path / "quarantine", max_retries=0, minimum_magnitude=-10)

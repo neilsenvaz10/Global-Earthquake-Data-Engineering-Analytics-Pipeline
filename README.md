@@ -1,28 +1,27 @@
 # QuakeTrack
 
 Global Earthquake Data Engineering & Analytics Pipeline. `PROJECT.md` is the primary
-specification. **Phases 1-4 are implemented.** Historical extraction, validation,
+specification. **Phases 1–5 are implemented and locally verified.** Historical extraction, validation,
 quarantine, repeatable staging, PostgreSQL loading, migrations and analytical SQL
 work. Airflow orchestration, incremental coverage and monitoring are verified.
-The Phase 5 Streamlit dashboard has not been started.
+The Streamlit dashboard provides five PostgreSQL-backed pages with shared filters and CSV export.
 
 ## Local setup (PowerShell)
 
-Use Python 3.11-3.14. Tested here with Python 3.14.6. No new dependencies are needed
-for Phase 2; the existing pinned dependencies support the implementation.
+Use Python 3.11-3.14. Tested here with Python 3.14.6. Airflow runs separately in its Python 3.12 Linux container.
 
 ```powershell
 python -m venv .venv
 # If venv fails at ensurepip but creates the environment, bootstrap with:
 # python -m pip --python .venv install pip
-.\.venv\Scripts\python -m pip install -e ".[dev]"
+.\.venv\Scripts\python -m pip install -e ".[dev,dashboard]"
 # Fresh clones only; preserve an existing .env:
-Copy-Item .env.example .env
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
 The existing ignored `.env` has a generated password and `POSTGRES_PORT=55432`.
 Keep this file for the initialized database. For a fresh clone, choose a password
-and available port before starting PostgreSQL. Process environment variables override
+and keep POSTGRES_PORT=55432 before starting PostgreSQL. Process environment variables override
 `.env`. Never commit credentials. Relative configured data paths resolve against
 the project root; a CLI `--output-dir` resolves against the current working directory.
 
@@ -142,8 +141,7 @@ Integration tests explicitly create an isolated test DB; development is never re
 .\.venv\Scripts\python -m pytest --database-tests -q --basetemp=.pytest_tmp/db-check
 ```
 
-The role needs CREATEDB to run those tests. Default pytest runs 96 offline tests
-and skips 29 database tests. The verified full run passed all 125. Real development
+The role needs CREATEDB to run those tests. Phase 4 originally passed 125 tests. The Phase 5 totals and verification evidence are in the final report. Real development
 loading inserted 37 events; repeat and offline replay each reported 37 unchanged.
 
 See [database schema and operations](docs/database.md) for tables, constraints,
@@ -158,7 +156,7 @@ Changing `.env` does not rotate existing PostgreSQL passwords. Use administratio
 commands for role changes. For an existing database, configure its host/port and
 credentials instead of starting Compose. Future containers will use host `postgres`.
 
-Phases 1-4 are complete. Phase 5 requires approval and will add the dashboard.
+Phases 1–5 are complete for the bounded local college demonstration.
 No ML or prediction is included.
 
 - [Implementation plan](docs/implementation_plan.md)
@@ -181,8 +179,7 @@ http://localhost:18080 (admin; password is AIRFLOW_ADMIN_PASSWORD in local .env)
 .\.venv\Scripts\python -m quaketrack.cli migrate
 docker compose --profile airflow build airflow
 docker compose --profile airflow up -d airflow
-# Enable the configured hourly schedule when ready:
-docker compose exec airflow airflow dags unpause quaketrack_earthquake_ingestion
+# Keep the DAG paused. Do not enable recurring ingestion without explicit approval.
 # Stop Airflow services without deleting any volumes or stopping the app DB:
 docker compose --profile airflow stop airflow airflow-db
 ```
@@ -201,3 +198,112 @@ Three current real events were inserted, bringing the total to 40; the original
 37 were unchanged. Application tests passed 125 cases plus 3 real DAG checks.
 
 - [Phase 4 report](docs/phase4_report.md)
+
+## Phase 5 dashboard and local deployment
+
+Open [QuakeTrack](http://localhost:8501) and [Airflow](http://localhost:18080).
+The application database remains PostgreSQL on `localhost:55432`. Docker Desktop
+must use Linux containers. Preserve the existing `.env` and named volumes.
+
+After the environment setup above, start the complete local demo:
+
+```powershell
+docker compose up -d --wait postgres
+.\.venv\Scripts\python -m quaketrack.cli migrate
+.\.venv\Scripts\python scripts/setup_airflow.py
+docker compose --profile airflow build airflow
+docker compose --profile airflow up -d --wait airflow
+docker compose --profile dashboard build dashboard
+docker compose --profile dashboard up -d --wait dashboard
+```
+
+The dashboard profile does not start Airflow. Airflow has its own metadata database;
+earthquakes and application monitoring remain in the original application database.
+The DAG remains **paused**; no recurring ingestion is enabled by these instructions
+on this verified checkout. A fresh DAG is created paused. An existing installation
+retains its saved pause state, so inspect it in Airflow before a demonstration.
+
+For development, run Streamlit directly on Windows instead of the dashboard container:
+
+```powershell
+docker compose --profile dashboard stop dashboard
+.\.venv\Scripts\python -m streamlit run dashboard/app.py
+```
+
+Do not run both on port 8501. If another application occupies it, pass
+`--server.port=8502` to Python or set `STREAMLIT_PORT=8502` in `.env` for Docker.
+Airflow admin credentials stay in the local `.env`; the dashboard does not receive them.
+The dashboard container is built from source, so rebuild it after code changes.
+
+Navigation includes Overview, Earthquake Map, Trends, Explorer, and Pipeline
+Monitoring. Shared date, magnitude, depth and literal location filters run in SQL.
+Both date inputs are inclusive UTC dates; the SQL end is the next midnight,
+exclusive. Numeric bounds are inclusive. Unknown magnitude/depth are included
+by default, even with active bounds; uncheck the explicit option to require both
+measurements. Valid negative measurements are preserved. Location is free text,
+not a country assignment. Explorer offers deterministic sorting, pages of
+25/50/100 rows, and a UTF-8 CSV of every matching row up to 10,000 events.
+Selections above that limit must be narrowed before export. Map and scatter
+use the newest 5,000 matches with visible limits. Server-side frequency and
+adaptive histograms aggregate all matches, including an unknown bin.
+
+Connections reuse Phase 1 settings and a managed SQLAlchemy pool. Dashboard
+connections default to read-only transactions, and each query explicitly starts
+read-only. Writes are rejected in integration tests. No startup migrations or
+ingestion are performed. Query results expire after 60 seconds; Refresh data
+clears them immediately. Credentials are never rendered. Friendly DB failure and
+empty-selection states never substitute sample data. Map tiles need internet.
+
+Operational history comes from `pipeline_health`, `ingestion_runs` and
+`pipeline_state`; it is global rather than earthquake-filtered. Workflow parents
+and child persistence loads are separate. Database history cannot establish live
+scheduler status; the page says so and links to Airflow. Event/source-update age,
+record-ingestion age, successful-workflow age and checkpoint lag have distinct
+meanings. An unchanged replay does not rewrite an event's ingestion timestamp.
+
+The verified database contains **40 real events on two dates**, October 1 and 25,
+2026, from requests with magnitude thresholds 4 and 5. It is sufficient for a
+functional demo, not a complete history or reliable frequency inference. Blank
+periods do not establish zero earthquakes. See the report for a proposed 30-day
+dataset; it has **not** been ingested.
+
+Verification commands:
+
+```powershell
+.\.venv\Scripts\python -m pytest --database-tests -q --basetemp=.pytest_tmp/final-check
+.\.venv\Scripts\python -m pip check
+docker compose exec -T airflow python /workspace/scripts/verify_airflow_dag.py
+# Explicitly executes one six-hour historical DAG run using LocalExecutor:
+docker compose exec -T airflow python /workspace/scripts/verify_phase5_airflow.py
+# This checkout already has a preservation snapshot from before Phase 5 verification:
+.\.venv\Scripts\python scripts/verify_dashboard.py
+```
+
+`--database-tests` creates a fresh `quaketrack_test_<uuid>` database and only resets
+synthetic fixtures there. It requires CREATEDB and leaves that test DB for inspection.
+The live verification script uses read-only connections, checks original event rows
+and archive hashes against ignored `data/staging/phase5/before.json`, opens all five
+pages with AppTest, checks real filters and CSV, and compares KPIs to existing SQL.
+For a fresh environment, capture `scripts/verify_dashboard.py --snapshot` before
+your own bounded verification. It refuses to overwrite a previous snapshot. A
+later legitimate source revision may change event rows and fail this strict
+preservation check; inspect that change rather than replacing evidence blindly.
+
+Stop safely (no volumes are removed):
+
+```powershell
+docker compose --profile dashboard stop dashboard
+docker compose --profile airflow stop airflow airflow-db
+docker compose stop postgres
+```
+
+Stop a host Streamlit process with Ctrl+C. Never run `down -v` or delete raw
+archives. The original `requirements-lock.txt` remains the core dependency set;
+`requirements-dashboard-lock.txt` records the resolved Windows Python 3.14 demo
+environment. For that exact environment, install it with `pip install -r`, then
+install the local package using `pip install --no-deps -e .`. Docker resolves
+platform-specific transitive wheels from the pinned direct dependencies.
+
+- [Final report and verification evidence](docs/phase5_report.md)
+- [4–5 minute demonstration](docs/DEMO_GUIDE.md)
+- [Viva questions and answers](docs/VIVA_QA.md)
