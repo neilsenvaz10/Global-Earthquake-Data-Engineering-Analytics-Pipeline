@@ -1,0 +1,27 @@
+CREATE TABLE ingestion_runs (
+    run_id UUID PRIMARY KEY,
+    job_type TEXT NOT NULL CHECK (job_type IN ('backfill', 'replay')),
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at TIMESTAMPTZ,
+    status TEXT NOT NULL CHECK (status IN ('running', 'success', 'failed', 'interrupted')),
+    window_start TIMESTAMPTZ NOT NULL,
+    window_end TIMESTAMPTZ NOT NULL CHECK (window_end > window_start),
+    staging_path TEXT NOT NULL,
+    records_fetched BIGINT NOT NULL DEFAULT 0 CHECK (records_fetched >= 0),
+    records_accepted BIGINT NOT NULL DEFAULT 0 CHECK (records_accepted >= 0),
+    records_rejected BIGINT NOT NULL DEFAULT 0 CHECK (records_rejected >= 0),
+    records_filtered BIGINT NOT NULL DEFAULT 0 CHECK (records_filtered >= 0),
+    records_deduplicated BIGINT NOT NULL DEFAULT 0 CHECK (records_deduplicated >= 0),
+    records_unique BIGINT NOT NULL DEFAULT 0 CHECK (records_unique >= 0),
+    records_inserted BIGINT NOT NULL DEFAULT 0 CHECK (records_inserted >= 0),
+    records_updated BIGINT NOT NULL DEFAULT 0 CHECK (records_updated >= 0),
+    records_unchanged BIGINT NOT NULL DEFAULT 0 CHECK (records_unchanged >= 0),
+    source_response_count BIGINT NOT NULL DEFAULT 0 CHECK (source_response_count >= 0),
+    chunks_completed INTEGER NOT NULL DEFAULT 0 CHECK (chunks_completed >= 0),
+    chunks_skipped INTEGER NOT NULL DEFAULT 0 CHECK (chunks_skipped >= 0),
+    error_message TEXT,
+    CHECK (records_fetched = records_accepted + records_rejected),
+    CHECK (records_accepted = records_filtered + records_deduplicated + records_unique),
+    CHECK (records_unique = records_inserted + records_updated + records_unchanged)
+);
+CREATE INDEX idx_runs_started_at ON ingestion_runs (started_at DESC);

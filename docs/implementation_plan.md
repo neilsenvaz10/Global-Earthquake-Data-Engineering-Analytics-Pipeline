@@ -10,7 +10,7 @@ PROJECT.md remains the source of truth and is unchanged.
 2. **Phase 2 (completed):** reusable extractor with bounded retries,
    historical windows, replayable archives, normalization, validation, quarantine,
    deterministic deduplication and unit tests. No database loading yet.
-3. **Phase 3:** migrations, transactional revision-aware upserts, indexes, analytical
+3. **Phase 3 (completed):** migrations, transactional revision-aware upserts, indexes, analytical
    queries, integrity and repeat-load integration tests.
 4. **Phase 4:** Airflow deployment in a supported Linux/container Python runtime,
    hourly incremental updates, 72-hour lookback, checkpoints, run metrics and recovery.
@@ -41,4 +41,12 @@ PROJECT.md remains the source of truth and is unchanged.
 Phase 2 was explicitly authorized and is complete. It reuses Phase 1 configuration,
 logging and dependencies, adds local staging for repeat/resume checks, and leaves
 PostgreSQL loading for Phase 3. See phase2_report.md for 88 passing tests and bounded
-real-data results. Phase 3 still requires explicit approval.
+real-data results. Phase 3 was subsequently approved and completed; see phase3_report.md. Phase 4
+still requires explicit approval.
+
+## Phase 3 verification
+
+Added explicit SQL migrations, PostgreSQL repository/loading, offline raw replay,
+separate DB checkpoints and analytical queries. All 110 tests passed, including
+22 tests in a new isolated database. The 37 real Phase 2 events were loaded and
+verified in development. No Airflow or dashboard was implemented.
