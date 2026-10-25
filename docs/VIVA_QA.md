@@ -96,3 +96,51 @@
     dates, uses different magnitude thresholds, and is incomplete. Mixed magnitude
     scales complicate comparison, basemap tiles require internet, and no forecasts
     or hazard conclusions are supported.
+
+41. **What is medallion architecture?** A way to organize raw data as Bronze,
+    validated data as Silver, and analytical outputs as Gold. Here it is a logical
+    mapping onto existing files, a PostgreSQL table and ordinary SQL views.
+42. **Why not copy all data into three directories?** The existing archives and
+    curated table already serve those roles. Logical layers avoid unnecessary
+    duplicate storage; the optional small Spark snapshot is a reproducibility artifact.
+43. **Are these layers Delta Lake or Iceberg?** No. Those are specific table
+    formats and technologies. This project uses local GeoJSON and PostgreSQL.
+44. **What is a Spark DataFrame?** A distributed-capable table with a schema and
+    named columns. This demo supplies explicit types and nullability instead of inference.
+45. **Why use an explicit schema?** Small inputs or all-null columns can produce
+    incorrect inference. Explicit timestamp/double/string types make behavior predictable.
+46. **What are transformations and actions?** Transformations such as filter and
+    groupBy build a lazy plan. Actions such as count and collect execute that plan.
+47. **What does local[2] mean?** Spark executes on one machine using two local
+    execution threads. It demonstrates Spark APIs without a distributed cluster.
+48. **What does withColumn do here?** It derives UTC event dates and magnitude
+    categories while retaining the original measurements, including negatives and nulls.
+49. **What is Spark SQL?** SQL executed by Spark over DataFrames registered as
+    temporary views. The example groups events by UTC month and computes counts and averages.
+50. **How do you establish Spark/SQL parity?** Export Silver rows and PostgreSQL
+    Gold aggregates in the same repeatable-read snapshot. Compare group keys/counts,
+    nulls and averages, allowing tiny floating-point rounding differences.
+51. **Why is Spark optional?** PostgreSQL and Python handle this sample efficiently.
+    Spark is a syllabus demonstration; neither Airflow ingestion nor Streamlit needs it.
+52. **What is a data contract?** A versioned agreement about field names, types,
+    required values, UTC, valid ranges, uniqueness, nulls, updates and provenance.
+53. **Why are raw numeric strings accepted but processed strings rejected?**
+    Normalization may convert source representations. Silver is expected to have
+    already completed that conversion, so its contract requires numeric values.
+54. **How is the compliance percentage calculated?** Valid supplied processed
+    rows divided by all supplied processed rows. Invalid fields/provenance and all
+    rows in repeated-ID groups fail compliance. Empty input has no percentage.
+55. **Is 100% Silver compliance the same as no source problems?** No. Rejected
+    source features may already have been quarantined. This report measures the
+    supplied curated rows, not every raw source feature or catalog completeness.
+56. **What does governance mean in this project?** Clear ownership/source, documented
+    field policies, immutable provenance, reproducibility, quality evidence and controlled access.
+57. **How is PostgreSQL least privilege applied?** Streamlit uses a separate login
+    with only required reads. It receives no ETL password and cannot modify permanent
+    project tables, even if client read-only mode is turned off.
+58. **Why test SQLSTATE 42501?** It is PostgreSQL's insufficient-privilege result.
+    It proves ACL denial, rather than relying only on a client transaction setting.
+59. **Why keep ETL credentials separate?** ETL must write validated observations;
+    a dashboard needs only reads. Separate identities reduce the dashboard's authority.
+60. **Why use ordinary Gold views?** The dataset is small. Views remain current
+    automatically and avoid extra storage and materialized-view refresh scheduling.

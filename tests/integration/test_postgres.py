@@ -79,6 +79,58 @@ def create_run(engine):
     return run_id
 
 
+def test_gold_views_match_silver_and_exclude_other_event_types(db):
+    rows = [normalize_feature(feature("gold-negative", mag=-1, depth=-2)),
+            normalize_feature(feature("gold-null", mag=None, depth=None)),
+            normalize_feature(feature("gold-high", at=EPOCH + 86400000, mag=6, depth=100)),
+            normalize_feature(feature("gold-filtered", mag=9))]
+    rows[-1]["event_type"] = "quarry blast"
+    run_id = create_run(db)
+    with db.begin() as connection:
+        upsert_events(connection, rows, run_id)
+        daily = connection.execute(text("SELECT * FROM gold_daily_earthquakes ORDER BY event_day")).mappings().all()
+        assert [row["event_count"] for row in daily] == [2, 1]
+        assert daily[0]["known_magnitudes"] == 1 and daily[0]["average_depth_km"] == -2
+        categories = dict(connection.execute(text("SELECT magnitude_category,event_count FROM gold_magnitude_distribution")).all())
+        assert categories == {"<0": 1, "unknown": 1, "6+": 1}
+        monthly = connection.execute(text("SELECT * FROM gold_monthly_earthquakes")).mappings().one()
+        assert monthly["event_count"] == 3 and monthly["average_magnitude"] == 2.5
+        depths = {row["magnitude_category"]: row for row in connection.execute(text("SELECT * FROM gold_depth_by_magnitude")).mappings()}
+        assert depths["unknown"]["known_depths"] == 0 and depths["unknown"]["average_depth_km"] is None
+        assert sum(row["event_count"] for row in depths.values()) == 3
+
+
+def test_dashboard_role_permissions_and_etl_writes_are_preserved(db):
+    from quaketrack.dashboard.security import ensure_dashboard_role
+    from quaketrack.dashboard.data import DashboardData
+    name, password = "qt_reader_test_" + uuid4().hex, uuid4().hex
+    result = ensure_dashboard_role(db, name, password)
+    assert result["created"] and not ensure_dashboard_role(db, name, password)["created"]
+    reader = create_database_engine(replace(load_settings(), db_name=db.url.database, db_user=name, db_password=password))
+    try:
+        with reader.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+            assert connection.exec_driver_sql("SHOW default_transaction_read_only").scalar_one() == "on"
+            connection.exec_driver_sql("SET default_transaction_read_only=off")
+            connection.exec_driver_sql("SELECT * FROM gold_daily_earthquakes").all()
+            for statement in ("INSERT INTO earthquakes(event_id) SELECT 'test-only' WHERE false",
+                              "UPDATE earthquakes SET magnitude=magnitude WHERE false", "DELETE FROM earthquakes WHERE false"):
+                with pytest.raises(DBAPIError) as error:
+                    connection.exec_driver_sql(statement)
+                assert error.value.orig.sqlstate == "42501"
+            for statement in ("SELECT * FROM rejected_events", "SELECT error_message FROM ingestion_runs", "SELECT archive_path FROM raw_archives"):
+                with pytest.raises(DBAPIError) as error:
+                    connection.exec_driver_sql(statement)
+                assert error.value.orig.sqlstate == "42501"
+        assert DashboardData(reader).coverage()["total"] == 0
+        assert DashboardData(reader).monitoring()["workflows"] == []
+        run_id = create_run(db)
+        with db.begin() as connection:
+            assert upsert_events(connection, [normalize_feature(feature())], run_id)["inserted"] == 1
+        assert DashboardData(reader).coverage()["total"] == 1
+    finally:
+        reader.dispose()
+
+
 def test_dashboard_query_filters_csv_and_readonly(db):
     import csv
     import io
@@ -182,7 +234,8 @@ def test_migrations_repeat_and_checksum_guard(db, tmp_path):
 def test_migration_transaction_rolls_back_pending_files(db, tmp_path):
     for source in MIGRATION_DIR.glob("*.sql"):
         (tmp_path / source.name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-    (tmp_path / "005_bad.sql").write_text("CREATE TABLE mock_should_rollback(id INT); SELECT 1/0;")
+    next_version = max(int(path.name[:3]) for path in MIGRATION_DIR.glob("*.sql")) + 1
+    (tmp_path / f"{next_version:03}_bad.sql").write_text("CREATE TABLE mock_should_rollback(id INT); SELECT 1/0;")
     with pytest.raises(DBAPIError):
         apply_migrations(db, tmp_path)
     with db.connect() as connection:

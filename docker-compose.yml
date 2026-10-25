@@ -101,8 +101,8 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-quaketrack}
-      POSTGRES_USER: ${POSTGRES_USER:-quaketrack_app}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      DASHBOARD_DB_USER: ${DASHBOARD_DB_USER:-quaketrack_dashboard}
+      DASHBOARD_DB_PASSWORD: ${DASHBOARD_DB_PASSWORD:-}
     ports:
       - '127.0.0.1:${STREAMLIT_PORT:-8501}:8501'
     depends_on:
@@ -113,6 +113,20 @@ services:
       interval: 15s
       timeout: 10s
       retries: 10
+  spark:
+    build:
+      context: .
+      dockerfile: docker/spark/Dockerfile
+    profiles: [spark]
+    environment:
+      SPARK_LOCAL_IP: 127.0.0.1
+      PYTHONPATH: /workspace/src
+    volumes:
+      - ./src:/workspace/src:ro
+      - ./contracts:/workspace/contracts:ro
+      - ./tests/spark:/workspace/tests/spark:ro
+      - ./data/staging/phase6/demo:/inputs:ro
+      - ./data/staging/phase6/spark:/outputs
 volumes:
   postgres_data:
   airflow_metadata:

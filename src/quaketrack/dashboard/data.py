@@ -8,6 +8,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from sqlalchemy import text
 
 from ..storage.database import create_database_engine
+from .security import HEALTH_COLUMNS
 
 UTC = timezone.utc
 CHART_LIMIT = 5000
@@ -167,7 +168,7 @@ class DashboardData:
 
     def monitoring(self):
         return {
-            "workflows": self.fetch("SELECT * FROM pipeline_health ORDER BY started_at DESC LIMIT 50"),
+            "workflows": self.fetch(f"SELECT {', '.join(HEALTH_COLUMNS)} FROM pipeline_health ORDER BY started_at DESC LIMIT 50"),
             "last_success": self.fetch("""SELECT MAX(finished_at) AS finished_at FROM ingestion_runs
                 WHERE status='success' AND execution_key IS NOT NULL""")[0]["finished_at"],
             "loads": self.fetch("""SELECT run_id, job_type, status, started_at, finished_at,

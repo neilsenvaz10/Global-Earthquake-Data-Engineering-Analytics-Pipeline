@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
 
-from ..config import load_settings
+from .security import load_dashboard_settings
 from . import charts
 from .data import CHART_LIMIT, EXPORT_LIMIT, DashboardData, Filters, dashboard_engine, freshness, utc_label
 
@@ -13,7 +13,7 @@ PAGES = ("Overview", "Earthquake Map", "Trends", "Explorer", "Pipeline Monitorin
 
 @st.cache_resource
 def get_data():
-    return DashboardData(dashboard_engine(load_settings()))
+    return DashboardData(dashboard_engine(load_dashboard_settings()))
 
 
 @st.cache_data(ttl=60, max_entries=256, show_spinner=False)

@@ -1,0 +1,34 @@
+{
+  "name": "quaketrack.normalized_earthquake",
+  "version": "1.0.0",
+  "stage": "processed Silver records, not raw GeoJSON features",
+  "fields": {
+    "event_id": {"type": "string", "required": true, "nonempty": true},
+    "occurred_at": {"type": "timestamp", "required": true, "timezone": "UTC", "precision": "milliseconds"},
+    "source_updated_at": {"type": "timestamp", "required": false, "timezone": "UTC", "precision": "milliseconds"},
+    "magnitude": {"type": "number", "required": false, "finite": true, "negative_values": "preserve"},
+    "magnitude_type": {"type": "string", "required": false},
+    "depth_km": {"type": "number", "required": false, "finite": true, "unit": "km", "negative_values": "preserve"},
+    "latitude": {"type": "number", "required": true, "minimum": -90, "maximum": 90},
+    "longitude": {"type": "number", "required": true, "minimum": -180, "maximum": 180},
+    "place_description": {"type": "string", "required": false},
+    "event_type": {"type": "string", "required": true, "nonempty": true},
+    "event_status": {"type": "string", "required": false},
+    "source": {"type": "string", "required": true, "nonempty": true, "constant": "USGS"},
+    "network": {"type": "string", "required": false},
+    "source_code": {"type": "string", "required": false},
+    "source_ids": {"type": "string", "required": false},
+    "source_networks": {"type": "string", "required": false},
+    "source_url": {"type": "string", "required": false},
+    "detail_url": {"type": "string", "required": false}
+  },
+  "null_policy": "Optional fields may be missing or null; never replace unknown measurements with zero.",
+  "uniqueness": {"key": "event_id", "scope": "one supplied current-event Silver dataset", "duplicate_policy": "all rows in a duplicate-ID group fail dataset uniqueness"},
+  "source_update_policy": "Only a known newer source_updated_at can replace an existing representation. Equal, older or missing revisions cannot overwrite it; occurrence and ingestion times are distinct.",
+  "provenance": {
+    "bronze": "Immutable response bytes plus source, request parameters, run ID, UTC fetched_at and SHA-256 metadata.",
+    "staged_silver": "Source archive references and checksums in the checkpoint manifest; quarantine excluded.",
+    "persisted_silver": "Required UUID last_run_id references ingestion_runs; chunks and raw_archives retain source provenance. Validated when require_provenance is enabled."
+  },
+  "report_denominator": "Every supplied processed row, before any deduplication. Rows with field/provenance errors or repeated event IDs fail compliance. Empty input has null compliance percentage. This is not the raw-source acceptance rate."
+}

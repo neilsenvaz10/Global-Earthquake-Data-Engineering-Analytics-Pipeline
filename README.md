@@ -5,6 +5,9 @@ specification. **Phases 1–5 are implemented and locally verified.** Historical
 quarantine, repeatable staging, PostgreSQL loading, migrations and analytical SQL
 work. Airflow orchestration, incremental coverage and monitoring are verified.
 The Streamlit dashboard provides five PostgreSQL-backed pages with shared filters and CSV export.
+Phase 6 adds logical Bronze–Silver–Gold layers, four SQL views, a processed-event
+contract and quality reporting, a dedicated dashboard reader, and an optional local
+PySpark demonstration. The normal ETL remains Python; Spark is isolated from it.
 
 ## Local setup (PowerShell)
 
@@ -213,6 +216,7 @@ docker compose up -d --wait postgres
 .\.venv\Scripts\python scripts/setup_airflow.py
 docker compose --profile airflow build airflow
 docker compose --profile airflow up -d --wait airflow
+.\.venv\Scripts\python scripts/setup_dashboard.py
 docker compose --profile dashboard build dashboard
 docker compose --profile dashboard up -d --wait dashboard
 ```
@@ -247,9 +251,13 @@ Selections above that limit must be narrowed before export. Map and scatter
 use the newest 5,000 matches with visible limits. Server-side frequency and
 adaptive histograms aggregate all matches, including an unknown bin.
 
-Connections reuse Phase 1 settings and a managed SQLAlchemy pool. Dashboard
-connections default to read-only transactions, and each query explicitly starts
-read-only. Writes are rejected in integration tests. No startup migrations or
+Connections reuse Phase 1 host/database settings and a managed SQLAlchemy pool.
+Dashboard credentials are separate `DASHBOARD_DB_USER` / `DASHBOARD_DB_PASSWORD`
+values: there is no fallback to ETL credentials. The dedicated role has SELECT
+permissions only on required tables/views or columns, without superuser flags,
+ownership or memberships. Writes are denied even when transaction read-only mode
+is disabled in verification. Connections also default to read-only transactions,
+and each query explicitly starts read-only. No startup migrations or
 ingestion are performed. Query results expire after 60 seconds; Refresh data
 clears them immediately. Credentials are never rendered. Friendly DB failure and
 empty-selection states never substitute sample data. Map tiles need internet.
@@ -307,3 +315,105 @@ platform-specific transitive wheels from the pinned direct dependencies.
 - [Final report and verification evidence](docs/phase5_report.md)
 - [4–5 minute demonstration](docs/DEMO_GUIDE.md)
 - [Viva questions and answers](docs/VIVA_QA.md)
+
+## Phase 6: syllabus demonstrations
+
+The existing `data/raw` files are **Bronze**; normalized staging and the current
+`earthquakes` table are **Silver**. Four ordinary SQL views are **Gold**:
+`gold_daily_earthquakes`, `gold_magnitude_distribution`, `gold_monthly_earthquakes`
+and `gold_depth_by_magnitude`. No files are moved or duplicated into new production
+layers. Views aggregate current earthquake-type rows; null measurements stay
+unknown, negative values remain valid, and all dates are UTC. This is a logical
+medallion layout, not Delta Lake, Iceberg or Hudi.
+
+For an existing checkout, apply the additive migration and configure the reader:
+
+```powershell
+docker compose up -d --wait postgres
+.\.venv\Scripts\python -m quaketrack.cli migrate
+.\.venv\Scripts\python scripts/setup_dashboard.py
+docker compose --profile dashboard build dashboard
+docker compose --profile dashboard up -d --wait dashboard
+```
+
+`setup_dashboard.py` creates `quaketrack_dashboard` with a generated password in
+ignored `.env`, or reuses its existing credentials without rotation. It grants only
+the required reads, omits sensitive audit columns, and refuses an existing powerful
+role rather than revoking privileges. ETL/Airflow continue to use `POSTGRES_USER` /
+`POSTGRES_PASSWORD`; Streamlit receives only `DASHBOARD_DB_USER` /
+`DASHBOARD_DB_PASSWORD`. Run setup again after reviewed migrations add a view the
+reader needs. New views are not granted automatically. Default PostgreSQL PUBLIC
+temporary-table privileges are not revoked; permanent project tables remain
+protected by ACLs. The existing bootstrap ETL role was not demoted or changed.
+
+The formal contract is `contracts/earthquake.v1.json`. It describes all 18
+normalized fields, source revisions, UTC/millisecond timestamps, optional values,
+uniqueness and provenance. Validation reuses existing domain functions. Processed
+numeric strings fail this contract even though raw-source normalization can convert
+them. The report denominator is every **processed Silver row supplied**, including
+duplicates, rather than every raw API feature fetched. All rows in a duplicate-ID
+group fail dataset uniqueness; an empty input has no compliance percentage.
+
+Generate a bounded, read-only Silver snapshot, SQL references and quality report:
+
+```powershell
+.\.venv\Scripts\python -m quaketrack.phase6 --verify-archives
+```
+
+The verified checkout already has these files under `data/staging/phase6/demo/`.
+The command refuses to overwrite them. For a later independent snapshot, pass a
+fresh `--output-dir`, such as `data/staging/phase6/demo-next`; Spark can read it using
+a matching bind mount. No earthquake rows or ingestion checkpoints are changed.
+The optional artifact is capped at 10,000 records. Silver and Gold are exported
+within the same repeatable-read transaction, so the parity denominator is identical.
+`--verify-archives` checks every local response checksum and verifies that each
+Silver row matches a valid normalized archived representation. It requires the
+local ignored source archive files; a fresh clone must ingest a small sample first.
+
+Optional Spark runs on Python 3.12 + OpenJDK 17 in Docker, using pinned
+**PySpark 4.1.3**, `local[2]`, UTC, two shuffle partitions and no exposed Spark UI.
+Java was absent from this Windows PATH; Docker supplies it without a host install.
+Neither normal ingestion nor dashboard startup installs or imports PySpark.
+
+```powershell
+docker compose --profile spark build spark
+docker compose --profile spark run --rm spark
+docker compose --profile spark run --rm spark python -m pytest tests/spark -q -p no:cacheprovider
+```
+
+The Spark job reads `/inputs/silver-snapshot.json` from the default demo mount,
+creates an explicit typed DataFrame, demonstrates `select`, `filter`, `withColumn`,
+`groupBy`, aggregates and Spark SQL, and compares four outputs to PostgreSQL.
+It writes a new `run-<uuid>/spark-report.json` under `data/staging/phase6/spark`.
+Each run preserves older reports. Collect/count are actions; the transformations
+build lazy plans. The container receives **no database or Airflow credentials**.
+This is single-machine teaching code, not a cluster or a performance improvement
+over PostgreSQL for 40 rows. The first image build downloads Java/Spark and takes
+several minutes; repeated executions reuse it. The native-Hadoop warning can occur
+for this local job; no Hadoop service or cluster is deployed.
+
+To use a fresh snapshot directory without editing Compose:
+
+```powershell
+docker compose --profile spark run --rm -v "${PWD}/data/staging/phase6/demo-next:/inputs:ro" spark
+```
+
+After the initial snapshot and Spark run, verify preservation, live Gold parity,
+real reader INSERT/UPDATE/DELETE denial, ETL privileges and the paused DAG:
+
+```powershell
+.\.venv\Scripts\python scripts/verify_phase6.py
+.\.venv\Scripts\python scripts/verify_dashboard.py
+.\.venv\Scripts\python -m pytest --database-tests -q --basetemp=.pytest_tmp/phase6-check
+docker compose exec -T airflow python /workspace/scripts/verify_airflow_dag.py
+```
+
+The Phase 6 verifier expects this checkout's ignored `before.json` preservation
+manifest and default `demo` snapshot. It is a local evidence checker, not a required
+startup step in fresh clones. Normal host pytest skips the optional Spark module;
+the five actual Spark tests run in its separate container. DB tests create a new
+isolated database and reader role, retained for inspection. No production rows are
+modified by tests. See the report for exact results and limits.
+
+- [Phase 6 implementation and verification](docs/phase6_report.md)
+- [Syllabus mapping](docs/SYLLABUS_MAPPING.md)
