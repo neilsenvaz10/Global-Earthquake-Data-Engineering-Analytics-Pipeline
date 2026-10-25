@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quaketrack"
+version = "0.1.0"
+description = "QuakeTrack Phase 1 source and environment verification"
+requires-python = ">=3.11,<3.15"
+dependencies = ["requests==2.34.2", "SQLAlchemy==2.1.6", "psycopg[binary]==3.3.6", "python-dotenv==1.2.4"]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
