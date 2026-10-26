@@ -417,3 +417,85 @@ modified by tests. See the report for exact results and limits.
 
 - [Phase 6 implementation and verification](docs/phase6_report.md)
 - [Syllabus mapping](docs/SYLLABUS_MAPPING.md)
+
+## Phase 7: expanded history and redesigned dashboard
+
+The approved 90-day backfill loaded **3,951 source observations** for
+`[2026-07-27, 2026-10-25)` UTC at magnitude ≥4.0. It inserted **3,914** events and
+left 37 overlapping events unchanged, bringing the database to **3,954** events
+across **91 event dates**. The three original October 25 observations remain
+outside the approved 90 complete days. All 40 original complete rows and all
+48 original raw files are preserved. No additional day was silently added when
+work resumed on October 26. Airflow remains paused on port 18080.
+
+The navy/teal interface includes responsive KPI cards, compact filters with Reset
+and Refresh, balanced Plotly panels, a compact recent-events table, optional
+technical Explorer columns, pagination and lossless filtered CSV. The Map page
+has a source-event inspector and an **Offline coordinate view** toggle. That
+fallback uses longitude/latitude axes without any external map tiles. Coordinate
+density cells are labeled by degrees; no countries are inferred from place text.
+
+Coverage comes from successful PostgreSQL chunk metadata, merged separately by
+source magnitude threshold. It distinguishes event dates from fully loaded UTC
+days. Histograms/counts use all selected rows; map/scatter remain capped at 5,000.
+Missing periods are not automatically filled with zeros. Amber timeline bars mark
+partial calendar periods or unverified coverage at the source threshold. Monitoring distinguishes
+current SQL metadata from dated archive/contract/Spark verification evidence,
+and shows whether the recorded dataset summary still matches current data.
+
+Update an existing deployment after pulling these changes:
+
+```powershell
+.\.venv\Scripts\python scripts/setup_dashboard.py
+docker compose --profile dashboard build dashboard
+docker compose --profile dashboard up -d --wait dashboard
+```
+
+The setup adds only SELECT access to chunk IDs, successful chunk windows/status
+and the raw archive chunk link. These non-sensitive fields are necessary to verify
+coverage; archive paths, quarantine and error details remain unreadable. No write
+permissions or password changes are introduced. The dashboard receives the small
+validation summary through a read-only bind mount, not raw archives or ETL secrets.
+
+The new **opt-in** `--preserve-existing` backfill option keeps existing PostgreSQL
+rows unchanged even when a newer source revision arrives. It applies when used
+with `--load-database`; normal ingestion retains its original revision-aware upsert
+policy. The approved run used this flag to respect preservation of the original
+40 rows. Its `unchanged` counter describes unchanged database rows; it does not
+prove every incoming representation had an identical source revision.
+
+Full results and source counts are in [the Phase 7 report](docs/phase7_report.md)
+and [the reviewed preflight](docs/phase7_preflight.md). The completed run has a
+fresh staging directory at `data/staging/phase7-90d-mag4`. To check resume of that
+already approved range without refetching successful windows:
+
+```powershell
+.\.venv\Scripts\python -m quaketrack.cli backfill --start 2026-07-27 --end 2026-10-25 --min-magnitude 4 --window-days 1 --max-windows 90 --output-dir data/staging/phase7-90d-mag4 --load-database --preserve-existing --resume
+```
+
+The job logs separate staging inserts from PostgreSQL inserts. A separate repeat
+of July 27 fetched 60 observations and reported all 60 unchanged in PostgreSQL.
+Do not delete named volumes or source archives to repeat a demonstration.
+
+Verification with the current expanded snapshot:
+
+```powershell
+.\.venv\Scripts\python scripts/verify_phase7.py
+.\.venv\Scripts\python -m pytest --database-tests -q --basetemp=.pytest_tmp/phase7-check
+docker compose exec -T airflow python /workspace/scripts/verify_airflow_dag.py
+docker compose --profile spark run --rm spark python -m pytest tests/spark -q -p no:cacheprovider
+docker compose --profile spark run --rm -v "${PWD}/data/staging/phase7/demo:/inputs:ro" -v "${PWD}/data/staging/phase7/spark:/outputs" spark
+```
+
+Phase 6's 40-row snapshot/report remains historical evidence. Use the Phase 7
+snapshot and verifier for current Spark parity; the old strict Phase 6 point-in-time
+verifier deliberately detects dataset expansion rather than silently treating an
+old snapshot as current. Phase 7 evidence is local and ignored under
+`data/staging/phase7`; fresh clones need their own approved ingestion and snapshot.
+To prepare a new independent snapshot without overwriting evidence, run
+`python -m quaketrack.phase6 --output-dir <fresh-directory> --verify-archives`
+with the venv Python and bind that directory to Spark's `/inputs`.
+
+Phase 7 publication was subsequently authorized by the user. Services retain ports
+55432/18080/8501. If Docker Desktop is stopped, run `docker desktop start`, then
+the normal Compose startup commands; existing named volumes restore the data.

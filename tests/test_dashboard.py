@@ -90,6 +90,8 @@ def sample_data(total=1):
         magnitude_type=None, depth_km=-2, latitude=1, longitude=2, place_description=None,
         event_status=None, source_url="https://earthquake.usgs.gov/earthquakes/eventpage/test-only")]
     data.timeline.return_value = [dict(period=NOW, events=total)] if total else []
+    data.coverage_windows.return_value = []
+    data.spatial_density.return_value = [dict(latitude_band=0, longitude_band=0, events=total)] if total else []
     data.distribution.return_value = [dict(bin_start=-1, events=total)] if total else []
     data.export.return_value = csv_bytes(data.events.return_value)
     data.monitoring.return_value = dict(workflows=[], state=[], loads=[], last_success=None)

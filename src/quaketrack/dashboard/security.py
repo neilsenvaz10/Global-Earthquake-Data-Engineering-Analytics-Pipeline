@@ -14,7 +14,8 @@ HEALTH_COLUMNS = ("run_id", "execution_key", "pipeline_name", "status", "stage",
     "coverage_lag_seconds")
 READ_COLUMNS = {
     "earthquakes": None, "schema_migrations": None, "pipeline_state": None,
-    "raw_archives": ("request_parameters",), "pipeline_health": HEALTH_COLUMNS,
+    "raw_archives": ("request_parameters", "chunk_id"), "pipeline_health": HEALTH_COLUMNS,
+    "ingestion_chunks": ("status", "window_start", "window_end", "chunk_id"),
     "ingestion_runs": ("run_id", "job_type", "status", "started_at", "finished_at", "execution_key",
                        "records_fetched", "records_inserted", "records_updated", "records_unchanged", "records_rejected"),
     "gold_daily_earthquakes": None, "gold_monthly_earthquakes": None,

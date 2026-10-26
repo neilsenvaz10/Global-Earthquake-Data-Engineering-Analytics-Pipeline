@@ -100,7 +100,9 @@ class DashboardData:
             MIN(magnitude) AS min_magnitude, MAX(magnitude) AS max_magnitude,
             MIN(depth_km) AS min_depth, MAX(depth_km) AS max_depth,
             MAX(last_ingested_at) AS last_ingested_at, CURRENT_TIMESTAMP AS queried_at,
-            (SELECT MAX(finished_at) FROM pipeline_health WHERE status='success') AS last_successful_workflow
+            (SELECT MAX(finished_at) FROM pipeline_health WHERE status='success') AS last_successful_workflow,
+            (SELECT MAX(finished_at) FROM ingestion_runs WHERE status='success' AND execution_key IS NULL) AS last_successful_load,
+            MAX(source_updated_at) AS latest_source_update
             FROM earthquakes WHERE event_type='earthquake'""")[0]
         summary["source_filters"] = self.fetch("""SELECT DISTINCT
             request_parameters->>'minmagnitude' AS minimum_magnitude,
@@ -116,6 +118,20 @@ class DashboardData:
             COUNT(*) FILTER (WHERE depth_km IS NULL) AS unknown_depth,
             MAX(occurred_at) AS latest_event, MAX(source_updated_at) AS latest_source_update,
             MAX(last_ingested_at) AS last_ingested_at FROM earthquakes WHERE {where}""", params)[0]
+
+    def coverage_windows(self, filters):
+        return self.fetch("""SELECT DISTINCT c.window_start,c.window_end,
+            a.request_parameters->>'minmagnitude' AS minimum_magnitude,
+            a.request_parameters->>'eventtype' AS event_type
+            FROM ingestion_chunks c JOIN raw_archives a ON a.chunk_id=c.chunk_id
+            WHERE c.status='success' AND c.window_start < :end AND c.window_end > :start
+            ORDER BY c.window_start,c.window_end LIMIT 10001""", {"start": filters.start,"end": filters.end})
+
+    def spatial_density(self, filters):
+        where, params = filters.sql()
+        return self.fetch(f"""SELECT floor(latitude/10)*10 AS latitude_band,
+            floor(longitude/10)*10 AS longitude_band, COUNT(*) AS events
+            FROM earthquakes WHERE {where} GROUP BY 1,2 ORDER BY events DESC,1,2 LIMIT 8""", params)
 
     def timeline(self, filters, interval="day"):
         if interval not in ("day", "week", "month"):
@@ -168,6 +184,11 @@ class DashboardData:
 
     def monitoring(self):
         return {
+            "gold": self.fetch("""SELECT name AS dataset,to_regclass('public.' || name) IS NOT NULL AS available,
+                CASE WHEN to_regclass('public.' || name) IS NULL THEN false ELSE
+                has_table_privilege(current_user,to_regclass('public.' || name),'SELECT') END AS select_allowed
+                FROM unnest(ARRAY['gold_daily_earthquakes','gold_magnitude_distribution',
+                'gold_monthly_earthquakes','gold_depth_by_magnitude']) AS name"""),
             "workflows": self.fetch(f"SELECT {', '.join(HEALTH_COLUMNS)} FROM pipeline_health ORDER BY started_at DESC LIMIT 50"),
             "last_success": self.fetch("""SELECT MAX(finished_at) AS finished_at FROM ingestion_runs
                 WHERE status='success' AND execution_key IS NOT NULL""")[0]["finished_at"],

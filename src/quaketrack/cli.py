@@ -23,6 +23,7 @@ def main(argv=None):
     backfill.add_argument("--resume", action="store_true", help="Verify and skip committed matching windows")
     backfill.add_argument("--max-windows", type=int, help="Stop after N newly processed windows; status=limited")
     backfill.add_argument("--load-database", action="store_true", help="Load completed staging windows into an explicitly migrated database")
+    backfill.add_argument("--preserve-existing", action="store_true", help="With --load-database, keep all existing event rows unchanged even if USGS has newer revisions")
     commands.add_parser("migrate", help="Apply reviewed SQL migrations explicitly")
     for name in ("load-staging", "replay"):
         command = commands.add_parser(name, help="Load Phase 2 artifacts" if name == "load-staging" else "Replay verified raw archives offline into PostgreSQL")
@@ -49,7 +50,7 @@ def main(argv=None):
                 engine = create_database_engine(settings)
                 try:
                     report["database_load"] = load_staging(engine, args.output_dir or settings.staging_dir,
-                                                          resume=args.resume)
+                                                          resume=args.resume, preserve_existing=args.preserve_existing)
                 finally:
                     engine.dispose()
         else:

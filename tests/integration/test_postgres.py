@@ -179,6 +179,23 @@ def test_dashboard_query_filters_csv_and_readonly(db):
     assert data.coverage()["total"] == 3
 
 
+def test_dashboard_coverage_and_spatial_aggregates_are_filtered_and_bound(db, tmp_path):
+    from datetime import date
+    from quaketrack.dashboard.data import DashboardData, Filters
+    from quaketrack.dashboard.presentation import complete_days
+    settings=stage(tmp_path,[[feature("coverage-a",mag=4),feature("coverage-b",mag=5)]])
+    load_staging(db,settings.staging_dir)
+    data=DashboardData(db)
+    filters=Filters.dates(date(2020,1,1),date(2020,1,3))
+    windows=data.coverage_windows(filters)
+    assert complete_days(windows,filters)=={"-10":1}
+    density=data.spatial_density(filters)
+    assert density==[dict(latitude_band=-20.0,longitude_band=120.0,events=2)]
+    assert data.spatial_density(replace(filters,min_magnitude=4.5))[0]["events"]==1
+    assert data.spatial_density(replace(filters,location="' OR 1=1 --"))==[]
+    assert data.coverage_windows(Filters.dates(date(2020,1,3),date(2020,1,3)))==[]
+
+
 def test_dashboard_empty_and_rejects_invalid_query_controls(db):
     from datetime import date
     from quaketrack.dashboard.data import DashboardData, Filters
@@ -283,6 +300,23 @@ def test_insert_duplicate_update_stale_and_unchanged_timestamps(db):
         assert actual["magnitude"] == 4 and actual["depth_km"] == 20
         assert actual["first_ingested_at"] == initial["first_ingested_at"]
         assert actual["last_run_id"] == second_run
+
+
+def test_opt_in_preservation_keeps_existing_rows_and_normal_updates_still_work(db, tmp_path):
+    first_run = create_run(db)
+    original = normalize_feature(feature(updated=EPOCH, mag=1))
+    with db.begin() as connection:
+        upsert_events(connection, [original], first_run)
+    with db.connect() as connection:
+        before = dict(connection.execute(text("SELECT * FROM earthquakes")).mappings().one())
+    settings = stage(tmp_path, [[feature(updated=EPOCH + 5000, mag=5), feature("new-test-event")]])
+    result = load_staging(db, settings.staging_dir, preserve_existing=True)
+    assert result["counts"]["inserted"] == 1 and result["counts"]["updated"] == 0
+    assert result["counts"]["unchanged"] == 1
+    with db.connect() as connection:
+        assert dict(connection.execute(text("SELECT * FROM earthquakes WHERE event_id='mock-a'")).mappings().one()) == before
+    result = load_staging(db, settings.staging_dir)
+    assert result["counts"]["updated"] == 1 and result["counts"]["unchanged"] == 1
 
 
 def test_missing_update_fallback_null_measurements_and_sql_injection(db):

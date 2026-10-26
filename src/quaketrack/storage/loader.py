@@ -34,7 +34,7 @@ def failure_detail(error):
     return f"{type(error).__name__}: {error}" if isinstance(error, (ValueError, KeyError)) else type(error).__name__
 
 
-def load_staging(engine, staging_dir, *, replay=False, resume=False, batch_size=500, scope_to_staging=False):
+def load_staging(engine, staging_dir, *, replay=False, resume=False, batch_size=500, scope_to_staging=False, preserve_existing=False):
     """Each successful window is one transaction, including events and provenance.
 
     A fresh run row records every load invocation, including repeated loads. Resume
@@ -53,6 +53,7 @@ def load_staging(engine, staging_dir, *, replay=False, resume=False, batch_size=
     counts = empty_counts()
     report = {"run_id": str(run_id), "mode": "replay" if replay else "staged",
               "counts": counts, "chunks_completed": 0, "chunks_skipped": 0, "source_response_count": 0}
+    report["existing_record_policy"] = "preserve unchanged" if preserve_existing else "accept newer source revisions"
     with staging_lock(root):
         state = load_state(root)
         checkpoints = state["checkpoints"]
@@ -113,7 +114,8 @@ def load_staging(engine, staging_dir, *, replay=False, resume=False, batch_size=
                                 reason_code=rejection["reason_code"], reason_detail=rejection["reason"],
                                 raw_event_json=JSON.NULL if rejection["raw_event"] is None else rejection["raw_event"],
                                 rejected_at=datetime.fromisoformat(rejection["ingested_at"].replace("Z", "+00:00"))))
-                        actions = upsert_events(connection, records, run_id, batch_size=batch_size, table=tables["earthquakes"])
+                        actions = upsert_events(connection, records, run_id, batch_size=batch_size,
+                                                table=tables["earthquakes"], preserve_existing=preserve_existing)
                         if actions["deduplicated"]:
                             raise ValueError("Staged normalized file unexpectedly contains duplicate IDs")
                         batch_counts = {**checkpoint["counts"], **{k: actions[k] for k in ("inserted", "updated", "unchanged")}}

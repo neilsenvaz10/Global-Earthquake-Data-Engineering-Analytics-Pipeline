@@ -105,6 +105,8 @@ services:
       DASHBOARD_DB_PASSWORD: ${DASHBOARD_DB_PASSWORD:-}
     ports:
       - '127.0.0.1:${STREAMLIT_PORT:-8501}:8501'
+    volumes:
+      - ./data/staging/phase7/validation:/workspace/data/staging/phase7/validation:ro
     depends_on:
       postgres:
         condition: service_healthy

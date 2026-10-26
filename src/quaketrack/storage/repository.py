@@ -41,7 +41,7 @@ def validated_record(record):
     return result
 
 
-def upsert_events(connection, records, run_id, *, batch_size=500, table=None):
+def upsert_events(connection, records, run_id, *, batch_size=500, table=None, preserve_existing=False):
     """Caller owns the transaction. All batches roll back together on failure.
 
     Insert with DO NOTHING RETURNING, then revision-aware upsert conflicts. This
@@ -66,7 +66,7 @@ def upsert_events(connection, records, run_id, *, batch_size=500, table=None):
         inserted = set(connection.execute(statement.returning(table.c.event_id)).scalars())
         conflicts = [row for row in rows if row["event_id"] not in inserted]
         updated = []
-        if conflicts:
+        if conflicts and not preserve_existing:
             incoming = insert(table).values(conflicts)
             updates = {name: getattr(incoming.excluded, name) for name in EVENT_FIELDS if name != "event_id"}
             updates.update(last_run_id=incoming.excluded.last_run_id, last_ingested_at=func.clock_timestamp())
