@@ -1,501 +1,443 @@
-# QuakeTrack
+# QuakeTrack 🌍⚡
 
-Global Earthquake Data Engineering & Analytics Pipeline. `PROJECT.md` is the primary
-specification. **Phases 1–5 are implemented and locally verified.** Historical extraction, validation,
-quarantine, repeatable staging, PostgreSQL loading, migrations and analytical SQL
-work. Airflow orchestration, incremental coverage and monitoring are verified.
-The Streamlit dashboard provides five PostgreSQL-backed pages with shared filters and CSV export.
-Phase 6 adds logical Bronze–Silver–Gold layers, four SQL views, a processed-event
-contract and quality reporting, a dedicated dashboard reader, and an optional local
-PySpark demonstration. The normal ETL remains Python; Spark is isolated from it.
+**QuakeTrack** is an end-to-end, production-grade Data Engineering and Analytics Pipeline for global seismic activity. It extracts real-time and historical earthquake event records from the **United States Geological Survey (USGS) Earthquake API**, validates and normalizes them through a strict data contract, persists them idempotently into a relational PostgreSQL data warehouse, automates incremental ingestion with Apache Airflow, and serves an interactive multi-page analytics dashboard built with Streamlit and Plotly.
 
-## Local setup (PowerShell)
+The project demonstrates core data engineering disciplines: resilient REST API extraction, raw payload preservation (Bronze), schema validation and quarantine (Silver), analytical data modeling (Gold), idempotency and revision-aware upserts, pipeline observability, role-based least privilege, and containerized big data processing (PySpark).
 
-Use Python 3.11-3.14. Tested here with Python 3.14.6. Airflow runs separately in its Python 3.12 Linux container.
+---
+
+## Table of Contents
+
+- [1. Project Overview & Objectives](#1-project-overview--objectives)
+- [2. System Architecture & Medallion Design](#2-system-architecture--medallion-design)
+- [3. Technology Stack](#3-technology-stack)
+- [4. Features Implemented & How They Work](#4-features-implemented--how-they-work)
+  - [A. Resilient Extraction & Raw Archival (Bronze)](#a-resilient-extraction--raw-archival-bronze)
+  - [B. Validation, Normalization & Quarantine (Silver)](#b-validation-normalization--quarantine-silver)
+  - [C. PostgreSQL Persistence & Analytical Views (Gold)](#c-postgresql-persistence--analytical-views-gold)
+  - [D. Airflow Orchestration & Incremental Ingestion](#d-airflow-orchestration--incremental-ingestion)
+  - [E. Interactive Analytics Dashboard](#e-interactive-analytics-dashboard)
+  - [F. Data Contracts & Governance](#f-data-contracts--governance)
+  - [G. Containerized PySpark Demonstration](#g-containerized-pyspark-demonstration)
+- [5. Project Directory Structure](#5-project-directory-structure)
+- [6. Getting Started & How to Run](#6-getting-started--how-to-run)
+  - [Prerequisites](#prerequisites)
+  - [1. Environment Setup & Installation](#1-environment-setup--installation)
+  - [2. Start PostgreSQL & Run Migrations](#2-start-postgresql--run-migrations)
+  - [3. Ingest Historical Data (Backfill)](#3-ingest-historical-data-backfill)
+  - [4. Launch the Streamlit Dashboard](#4-launch-the-streamlit-dashboard)
+  - [5. Run Airflow Orchestration (Optional Profile)](#5-run-airflow-orchestration-optional-profile)
+  - [6. Run PySpark Syllabus Demo (Optional Profile)](#6-run-pyspark-syllabus-demo-optional-profile)
+- [7. CLI Reference & Operations Cheatsheet](#7-cli-reference--operations-cheatsheet)
+- [8. Testing & Quality Verification](#8-testing--quality-verification)
+- [9. Safe Shutdown & Maintenance](#9-safe-shutdown--maintenance)
+
+---
+
+## 1. Project Overview & Objectives
+
+### The Problem
+Public earthquake feeds provided by the USGS are dynamic: events are added continuously, locations and depths are refined as additional seismograph data arrives, and magnitudes are updated hours or days after an event. Naive ingestion strategies suffer from:
+1. **Silent record loss** due to API pagination and query caps (USGS limits queries to 20,000 records, but practical HTTP stability caps requests at 1,000 records).
+2. **Duplicate or regressed records** when re-fetching recent time windows without revision awareness.
+3. **Boundary duplication** when querying discrete time windows without millisecond precision.
+4. **Data corruption** when unexpected schemas, null coordinates, or invalid measurements enter production tables.
+
+### What QuakeTrack Does
+- **Ingests Real-World Data**: Fetches seismic events across user-defined date ranges and magnitude thresholds.
+- **Ensures Zero Data Loss**: Recursively auto-splits time windows if the USGS 1,000-record query cap is reached, preventing silent truncation.
+- **Maintains Audit Provenance**: Stores raw immutable HTTP responses with SHA-256 cryptographic checksums before any transformation.
+- **Enforces Data Contracts**: Validates records against a strict 18-field schema specification, quarantining corrupted records with detailed diagnostic failure reasons.
+- **Provides Idempotency**: Implements revision-aware PostgreSQL upserts using the USGS `updated` timestamp. Newer revisions update existing rows; identical or older revisions are safely flagged `unchanged`.
+- **Automates Incremental Updates**: Uses Apache Airflow with a sliding 72-hour lookback window to catch recalculated parameters. Advances checkpoints only when both DB persistence and post-load data quality checks pass.
+- **Delivers Interactive Insights**: Serves an analytics interface with global maps, offline coordinate fallback mode, frequency histograms, depth/magnitude scatters, paginated data grids, and lossless CSV export.
+
+---
+
+## 2. System Architecture & Medallion Design
+
+QuakeTrack follows a structured **Medallion Architecture** (Bronze ➔ Silver ➔ Gold):
+
+```mermaid
+flowchart TD
+    USGS["USGS Earthquake API\n(FDSNWS Event Query)"] -->|"Windowed HTTP GET\n(Auto-splitting, retries)"| Bronze
+
+    subgraph Bronze_Layer ["Bronze Layer: Raw Storage"]
+        Bronze["data/raw/<run_id>/<hash>/<response_id>/\n- response.json\n- metadata.json (SHA-256, HTTP status)"]
+    end
+
+    Bronze -->|"Validate & Clean\n(contracts/earthquake.v1.json)"| Validation{"Schema Valid?"}
+
+    subgraph Quarantine_Area ["Quarantine"]
+        Quarantine["data/quarantine/<run_id>/<window_key>.json\n(Detailed error reason & raw payload)"]
+    end
+    Validation -->|No| Quarantine
+
+    subgraph Silver_Layer ["Silver Layer: Curated Staging & PostgreSQL"]
+        Validation -->|Yes| Staging["data/staging/<run_id>/<window_key>/normalized.json\n(Atomic state.json catalog)"]
+        Staging -->|"Revision-Aware Upsert\n(Atomic window transaction)"| PG_Silver[("PostgreSQL: earthquakes table\n(18 validated fields, constraints, indexes)")]
+    end
+
+    subgraph Gold_Layer ["Gold Layer: Analytical Views & Aggregations"]
+        PG_Silver --> GoldViews["SQL Gold Views:\n- gold_daily_earthquakes\n- gold_magnitude_distribution\n- gold_monthly_earthquakes\n- gold_depth_by_magnitude"]
+    end
+
+    subgraph Consumption ["Consumption & Analytics"]
+        GoldViews --> Streamlit["Streamlit Dashboard (Port 8501)\n(Dedicated read-only role: quaketrack_dashboard)"]
+        Airflow["Apache Airflow (Port 18080)\n(Hourly sliding lookback DAG)"] -.->|"Orchestrates"| Bronze
+        PG_Silver -.->|"Silver JSON Export"| PySpark["PySpark Container\n(DataFrame ops, aggregations, SQL parity)"]
+    end
+```
+
+| Layer | Implementation | Description |
+|---|---|---|
+| **Bronze** | `data/raw/` | Exact original API response payloads, HTTP metadata, retry counters, and SHA-256 hashes. Read-only and immutable. |
+| **Silver** | `data/staging/` & `earthquakes` table | Normalized, typed event records (18 fields). Cleaned coordinates, preserved negative depths/magnitudes, and quarantined outliers. |
+| **Gold** | SQL Views (`gold_*`) | Pre-aggregated analytical views in PostgreSQL for daily activity, magnitude distributions, monthly counts, and depth correlations. |
+
+---
+
+## 3. Technology Stack
+
+| Domain | Technology | Version | Purpose |
+|---|---|---|---|
+| **Core Language** | Python | 3.11 – 3.14 (3.14 tested on host, 3.12 in Docker) | ETL logic, validation, CLI tools, database loaders |
+| **Relational Database** | PostgreSQL | 17 (App DB) / 16 (Airflow DB) | Persistent warehouse, ACID transactions, Gold views |
+| **Database Tooling** | SQLAlchemy & psycopg3 | 2.1.6 / 3.3.6 (binary) | Connection pooling, typed queries, migration execution |
+| **Workflow Orchestration** | Apache Airflow | 3.3.2 (LocalExecutor) | Hourly incremental scheduling, quality-gated checkpoints |
+| **Web Dashboard** | Streamlit & Plotly | 1.66.1 / 7.1.0 | Interactive UI, charts, map visualizer, CSV export |
+| **Big Data / Distributed** | Apache Spark (PySpark) | 4.1.3 (OpenJDK 17) | Dockerized DataFrame transformations & Gold parity verification |
+| **Testing & Quality** | pytest & AppTest | 9.1.1 | Unit testing, isolated database integration tests, UI testing |
+| **Containerization** | Docker & Docker Compose | v2+ | Multi-container profiles (`postgres`, `airflow`, `dashboard`, `spark`) |
+
+---
+
+## 4. Features Implemented & How They Work
+
+### A. Resilient Extraction & Raw Archival (Bronze)
+- **Windowed Temporal Chunking**: Splits large date ranges into discrete windows (default 1 day or 0.5 day).
+- **Millisecond Precision Boundary Handling**: USGS queries use inclusive bounds. QuakeTrack offsets window end-times by 1 millisecond (`endtime = next_window_start - 1ms`), completely preventing boundary duplicate events.
+- **Dynamic Auto-Splitting**: If an API response returns 1,000 records (the USGS cap), the window is recursively halved until all records are guaranteed complete. Capped responses are archived as audit trails, but only complete leaf windows are committed.
+- **Exponential Backoff**: Automatic retries for HTTP 429 (rate limits) and 5xx (server errors) with configurable backoff.
+- **Immutable Archival**: Every raw payload is saved to `data/raw/<run_id>/<request_hash>/<response_id>/` with an accompanying `metadata.json` containing the request URL, parameters, fetch timestamp, HTTP status, attempt count, and SHA-256 checksum.
+
+### B. Validation, Normalization & Quarantine (Silver)
+- **Strict Data Contract**: Validates all records against [contracts/earthquake.v1.json](file:///d:/Global-Earthquake-Data-Engineering-Analytics-Pipeline/contracts/earthquake.v1.json).
+- **Measurement Policy**: Unknown/null measurements remain `null`; they are **never** coerced to zero (which would falsely imply a 0.0 magnitude or sea-level depth). Valid negative depths and magnitudes are preserved.
+- **Automated Quarantine**: Malformed features (e.g. missing IDs, coordinates out of [-90, 90] / [-180, 180] bounds, non-numeric timestamps) are rejected and written to `data/quarantine/<run_id>/<window_key>.json` with full diagnostic failure reasons.
+- **Atomic Staging State**: Generates `normalized.json` batches and an atomically written `state.json` catalog containing unique local IDs and checkpoint manifests.
+
+### C. PostgreSQL Persistence & Analytical Views (Gold)
+- **Schema Migrations**: Explicit, numbered SQL migrations (`001` through `005` in `sql/migrations/`) executed through `quaketrack.cli migrate`. No schema changes occur silently at application startup.
+- **Revision-Aware Upserts**: When inserting records, QuakeTrack checks the incoming `source_updated_at` against the stored `source_updated_at`:
+  - **Newer revision**: The record is updated with new coordinates, magnitude, or depth.
+  - **Equal or older revision**: The record is flagged `unchanged`, preventing stale overwrite.
+  - **Re-runs**: Completely idempotent; running the pipeline twice produces 0 new records.
+- **Operational Auditing**: Every loading operation records run metadata in `ingestion_runs`, chunk execution in `ingestion_chunks`, pipeline state in `pipeline_state`, and health indicators in `pipeline_health`.
+- **Analytical Gold Views**:
+  - `gold_daily_earthquakes`: Daily event counts, minimum, average, and maximum magnitudes.
+  - `gold_magnitude_distribution`: Event counts bucketed into magnitude classes (Minor, Light, Moderate, Strong, Major, Great).
+  - `gold_monthly_earthquakes`: Month-by-month historical event counts and average depths.
+  - `gold_depth_by_magnitude`: Cross-tabulated depth buckets vs. magnitude brackets.
+- **Offline Replay**: Full capability to rebuild the database from scratch (`quaketrack replay`) using only Bronze archives, with zero external network calls.
+
+### D. Airflow Orchestration & Incremental Ingestion
+- **Hourly Pipeline DAG**: Containerized Airflow 3.3.2 running under LocalExecutor with its own isolated PostgreSQL metadata DB.
+- **Sliding Lookback Window**: Evaluates the past 72 hours on each incremental run (`INCREMENTAL_LOOKBACK_HOURS=72`) to capture retroactive USGS event updates.
+- **Quality-Gated Checkpoints**: The pipeline checkpoint in `pipeline_state` advances **only** after two conditions are met:
+  1. PostgreSQL transaction commits successfully.
+  2. Post-load data quality and contract verification passes.
+- **Paused by Default**: Fresh deployments initialize with the DAG in a paused state to prevent uncontrolled background API requests until approved.
+
+### E. Interactive Analytics Dashboard
+Built with Streamlit, the application connects to PostgreSQL using a dedicated read-only role (`quaketrack_dashboard`) and features a navy/teal responsive interface across 5 core pages:
+1. **Overview**: High-level KPIs (total events, max magnitude, depth metrics), recent activity feed, daily trend charts, and strongest events table.
+2. **Earthquake Map**: Global geospatial scatter plot of epicenters color-coded by magnitude and depth. Includes an **Offline Coordinate View** fallback that renders longitude/latitude axes without requiring external map tile servers.
+3. **Trends & Distributions**: Magnitude frequency histograms, depth vs. magnitude scatter plots, and temporal density patterns.
+4. **Data Explorer**: Deterministic sorting, paginated tabular views (25/50/100 rows per page), column filters, and lossless UTF-8 CSV export (up to 10,000 rows).
+5. **Pipeline Operations & Monitoring**: Live view of ingestion runs, chunk audit status, data freshness metrics, checkpoint lag, and data contract compliance summaries.
+- **Security & Caching**: Database queries run with strict read-only transactions; credentials are never rendered. Queries are cached for 60 seconds with an immediate "Refresh" invalidation trigger.
+
+### F. Data Contracts & Governance
+- Formal JSON Schema definition in [contracts/earthquake.v1.json](file:///d:/Global-Earthquake-Data-Engineering-Analytics-Pipeline/contracts/earthquake.v1.json) covering 18 fields, coordinate bounding boxes, and timestamp precision.
+- Built-in validation suite (`python -m quaketrack.phase6 --verify-archives`) verifying that 100% of persisted Silver rows match their Bronze archive checksums and schema requirements.
+
+### G. Containerized PySpark Demonstration
+- Standalone Docker container running **PySpark 4.1.3** and **OpenJDK 17**.
+- Reads Silver snapshots exported from PostgreSQL and demonstrates distributed computing patterns:
+  - Strongly-typed DataFrame schema projection.
+  - Transformations: `filter`, `select`, `withColumn`, `groupBy`, and window functions.
+  - Spark SQL temporary views and aggregation queries.
+  - Automated parity verification comparing Spark outputs against PostgreSQL Gold views.
+- Operates independently: PySpark is not required for normal host ETL or dashboard operation.
+
+---
+
+## 5. Project Directory Structure
+
+```text
+Global-Earthquake-Data-Engineering-Analytics-Pipeline/
+├── .env.example                 # Environment template with connection & pipeline parameters
+├── docker-compose.yml           # Multi-service composition (postgres, airflow, dashboard, spark)
+├── pyproject.toml               # Python package configuration and dependencies
+├── requirements-lock.txt        # Pinned base ETL dependencies
+├── requirements-dashboard-lock.txt # Pinned Streamlit dashboard dependencies
+├── contracts/
+│   └── earthquake.v1.json       # Formal JSON Schema contract for normalized Silver events
+├── dags/
+│   └── earthquake_ingestion_dag.py # Airflow hourly incremental ingestion DAG
+├── dashboard/
+│   └── app.py                   # Streamlit application entrypoint
+├── data/
+│   ├── raw/                     # Bronze: Immutable API response archives with SHA-256 metadata
+│   ├── quarantine/              # Quarantined malformed records with failure diagnostic reasons
+│   └── staging/                 # Silver: Normalized batches, catalogs, and state checkpoints
+├── docker/
+│   ├── airflow/Dockerfile       # Custom Airflow 3.3.2 image with quaketrack installed
+│   ├── dashboard/Dockerfile     # Lightweight Streamlit container
+│   └── spark/Dockerfile         # PySpark 4.1.3 + OpenJDK 17 demonstration container
+├── docs/                        # Complete architecture docs, phase reports, and run guides
+├── scripts/
+│   ├── check_api.py             # USGS API connectivity test
+│   ├── setup_airflow.py         # Airflow database and credential initializer
+│   ├── setup_dashboard.py       # Dedicated read-only dashboard role creator
+│   ├── verify_airflow_dag.py    # DAG syntax and task structure validator
+│   ├── verify_dashboard.py      # AppTest automated dashboard test suite
+│   ├── verify_database.py       # PostgreSQL connectivity check
+│   └── verify_phase*.py         # Phase-specific verification suites
+├── sql/
+│   ├── migrations/              # Numbered schema migrations (001 to 005)
+│   └── analytics/               # Parameterized analytical queries
+├── src/quaketrack/
+│   ├── cli.py                   # Command-line interface entry point
+│   ├── config.py                # Environment configuration loader
+│   ├── governance.py            # Data contract validator and quality reporter
+│   ├── orchestration.py         # Incremental window logic and checkpoint manager
+│   ├── pipeline.py              # Core extraction, window splitting, and staging pipeline
+│   ├── spark_demo.py            # PySpark DataFrame transformations and Gold parity checks
+│   ├── dashboard/               # Streamlit pages, charts, data access, and security layer
+│   ├── ingestion/               # USGS HTTP client, windowing algorithms, raw archiver
+│   ├── monitoring/              # Run metrics, counters, and reconciliation
+│   ├── storage/                 # Database engine, migrations, loaders, and upsert logic
+│   └── transforms/              # Normalizer, schema validator, deduplicator, quarantine
+└── tests/                       # Complete pytest suite (offline units + isolated DB integration)
+```
+
+---
+
+## 6. Getting Started & How to Run
+
+### Prerequisites
+- **Operating System**: Windows, macOS, or Linux (PowerShell commands are shown below for Windows).
+- **Docker Desktop**: With Linux containers enabled.
+- **Python**: Version 3.11, 3.12, 3.13, or 3.14.
+- **Git**: For version control.
+
+---
+
+### 1. Environment Setup & Installation
+
+Clone the repository and initialize the Python virtual environment:
 
 ```powershell
+# 1. Clone the repository
+git clone https://github.com/neilsenvaz10/Global-Earthquake-Data-Engineering-Analytics-Pipeline.git
+cd Global-Earthquake-Data-Engineering-Analytics-Pipeline
+
+# 2. Create and activate virtual environment
 python -m venv .venv
-# If venv fails at ensurepip but creates the environment, bootstrap with:
-# python -m pip --python .venv install pip
+.\.venv\Scripts\Activate.ps1
+
+# 3. Install dependencies in editable mode
 .\.venv\Scripts\python -m pip install -e ".[dev,dashboard]"
-# Fresh clones only; preserve an existing .env:
+
+# 4. Copy environment configuration
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-The existing ignored `.env` has a generated password and `POSTGRES_PORT=55432`.
-Keep this file for the initialized database. For a fresh clone, choose a password
-and keep POSTGRES_PORT=55432 before starting PostgreSQL. Process environment variables override
-`.env`. Never commit credentials. Relative configured data paths resolve against
-the project root; a CLI `--output-dir` resolves against the current working directory.
+> [!NOTE]
+> The default configuration binds PostgreSQL to port `55432` (`localhost:55432`) to avoid conflicts with existing local PostgreSQL installations on port `5432`. Ensure your `.env` has `POSTGRES_PORT=55432`.
 
-For the resolved dependency set, install `requirements-lock.txt`, then install
-this local package with `--no-deps -e .`, using the venv Python. If venv has no pip,
-use `python -m pip --python .venv install -e ".[dev]"` from the host.
+---
 
-## Phase 1 connectivity checks
+### 2. Start PostgreSQL & Run Migrations
+
+Start the PostgreSQL 17 database container and apply the schema migrations:
 
 ```powershell
-# Start Docker Desktop with Linux containers first:
+# 1. Start the PostgreSQL container
 docker compose up -d --wait postgres
+
+# 2. Verify database connectivity
 .\.venv\Scripts\python scripts/verify_database.py
-.\.venv\Scripts\python scripts/check_api.py --start 2026-10-01 --end 2026-10-02
-```
 
-The database check runs SELECT 1 without creating tables. The API connectivity
-sample is capped at ten events; its metadata labels it as an incomplete window.
-It is separate from Phase 2's complete-window extraction. Both commands exit 1
-on failure. Phase 2 itself does not require a running database or DB credentials.
-
-## Phase 2 historical ETL
-
-A bounded real-data demonstration (one day, magnitude 4+, two half-day windows):
-
-```powershell
-.\.venv\Scripts\python -m quaketrack.cli backfill --start 2026-10-01 --end 2026-10-02 --min-magnitude 4 --window-days 0.5 --output-dir data/staging/demo
-# Verify archived artifacts and skip already committed matching windows:
-.\.venv\Scripts\python -m quaketrack.cli backfill --start 2026-10-01 --end 2026-10-02 --min-magnitude 4 --window-days 0.5 --output-dir data/staging/demo --resume
-```
-
-Dates/times are UTC by default; explicit offsets are converted to UTC. Start is
-inclusive and end is exclusive. Millisecond-aligned timestamps are supported. USGS
-uses inclusive bounds, so each API request ends one millisecond before the next
-window. An exact response cap triggers smaller requests, never silent truncation.
-At an unsplittable one-millisecond cap, the command fails visibly.
-
-A limited run processes complete windows; it is not a dry run and does write data:
-
-```powershell
-.\.venv\Scripts\python scripts/run_backfill.py --start 2026-10-01 --end 2026-10-03 --min-magnitude 4 --max-windows 1 --output-dir data/staging/limited-demo
-# Continue with the same output directory and options plus --resume.
-```
-
-A limited run reports `status=limited` and exits 0; failures exit 1, keyboard
-interrupts exit 130. Choose `--max-windows` to bound initial work rather than
-claiming a full backfill. `--window-days` defaults to 1; minimum magnitude defaults
-to 2.5. Requests default to a 1,000-record cap, 30-second timeout and three retries.
-Inspect `.env.example` for window, retry, archive, quarantine and staging settings.
-A new output directory gives a separate local catalog; the same directory preserves
-cross-run deduplication. Without `--resume`, matching windows are fetched again to
-observe source revisions. With it, verified completed windows are reused and do
-not refresh the source. Changing filters or window boundaries requires new work.
-
-### Outputs
-
-- `data/raw/<run_id>/<request_hash>/<response_id>/`: original response bytes and
-  request metadata, UTC fetch time, HTTP status, retry attempt and SHA-256.
-- `data/quarantine/<run_id>/<window_key>.json`: invalid original records with
-  validation reason, timestamp, run ID and source archive reference.
-- `<output-dir>/state.json`: local catalog keyed by USGS ID and committed window
-  checkpoints, replaced atomically together after staging artifacts are written.
-- `<output-dir>/runs/<run_id>/report.json`: status, committed counts, archives,
-  request attempts, skipped windows, errors and timestamps.
-- `<output-dir>/runs/<run_id>/<window_key>/normalized.json`: deduplicated normalized
-  records for that window. `state.json` contains the current unique catalog.
-
-The report's inserted/updated/unchanged counters refer to **local staging**, not
-PostgreSQL. Null measurements stay null; negative magnitudes/depths are permitted.
-Known newer source updates win. Missing/older/equal update timestamps cannot replace
-an existing record. Details and tie policies are in [ETL operations](docs/etl_operations.md).
-
-## Tests and verification
-
-```powershell
-New-Item -ItemType Directory -Force .pytest_tmp | Out-Null
-.\.venv\Scripts\python -m pytest -q --basetemp=.pytest_tmp/local-check
-.\.venv\Scripts\python -m pip check
-.\.venv\Scripts\python -m compileall -q src scripts tests
-```
-
-Use a fresh basetemp subdirectory in restricted environments. Tests are offline;
-all artificial records are explicitly labeled test mocks. Live verification fetched
-37 valid records for the example range; repeat and resume checks passed. This is
-not evidence that a 12-month backfill has run. See [Phase 2 report](docs/phase2_report.md).
-
-## Phase 3 PostgreSQL persistence
-
-Apply explicit migrations, then load the already verified Phase 2 sample:
-
-```powershell
+# 3. Apply schema migrations (creates tables, operational logs, and Gold views)
 .\.venv\Scripts\python -m quaketrack.cli migrate
-.\.venv\Scripts\python -m quaketrack.cli load-staging --staging-dir data/staging/phase2-live
-# Database resume checks DB success independently of extraction checkpoints:
-.\.venv\Scripts\python -m quaketrack.cli load-staging --staging-dir data/staging/phase2-live --resume
-# Rebuild and load from raw archives with no API requests:
-.\.venv\Scripts\python -m quaketrack.cli replay --staging-dir data/staging/phase2-live
-.\.venv\Scripts\python -m quaketrack.cli analytics overview --start 2026-10-01 --end 2026-10-02
 ```
 
-For a fresh clone, run a Phase 2 backfill first; ignored sample files are not shipped.
-To stage and load in one command after migration:
+---
+
+### 3. Ingest Historical Data (Backfill)
+
+Run a bounded historical extraction from the USGS API. You can stage and load into PostgreSQL in a single command:
 
 ```powershell
+# Ingest 1 day of real earthquakes (magnitude >= 4.0) into staging and load into PostgreSQL:
 .\.venv\Scripts\python -m quaketrack.cli backfill --start 2026-10-01 --end 2026-10-02 --min-magnitude 4 --window-days 0.5 --output-dir data/staging/demo --load-database
 ```
 
-Add --resume to skip verified extraction and successful DB chunks independently.
-Without it, repeated DB loading reports unchanged events and keeps their existing
-timestamps. Newer valid source revisions update rows; stale revisions cannot regress
-them. Loading is transactional per window. No schema is created on application startup.
-`state.json` and raw archives are needed for replay; normalized output files are not.
+Key options for `backfill`:
+- `--start`: Inclusive UTC start date/timestamp (`YYYY-MM-DD` or ISO 8601).
+- `--end`: Exclusive UTC end date/timestamp (`YYYY-MM-DD` or ISO 8601).
+- `--min-magnitude`: Minimum Richter/moment magnitude filter (e.g. `4.0` or `2.5`).
+- `--window-days`: Size of each extraction slice (e.g. `0.5` or `1`).
+- `--output-dir`: Destination folder for local staging artifacts.
+- `--load-database`: Automatically persists validated records into PostgreSQL.
+- `--resume`: Reuses verified existing staging checkpoints, fetching only incomplete windows.
 
-Integration tests explicitly create an isolated test DB; development is never reset:
-
+To verify idempotency, run the exact same command with `--resume`:
 ```powershell
-.\.venv\Scripts\python -m pytest --database-tests -q --basetemp=.pytest_tmp/db-check
+.\.venv\Scripts\python -m quaketrack.cli backfill --start 2026-10-01 --end 2026-10-02 --min-magnitude 4 --window-days 0.5 --output-dir data/staging/demo --load-database --resume
 ```
+*Notice that matching windows are skipped and the database reports 0 new rows inserted.*
 
-The role needs CREATEDB to run those tests. Phase 4 originally passed 125 tests. The Phase 5 totals and verification evidence are in the final report. Real development
-loading inserted 37 events; repeat and offline replay each reported 37 unchanged.
+---
 
-See [database schema and operations](docs/database.md) for tables, constraints,
-indexes, count definitions, all query names, test isolation and recovery. The
-[Phase 3 report](docs/phase3_report.md) contains the executed verification evidence.
+### 4. Launch the Streamlit Dashboard
 
-## Database service and later phases
+You can run the dashboard either **directly on the host** (recommended for interactive development) or **in a Docker container**.
 
-Keep PostgreSQL on localhost:55432 in this checkout. Compose binds only loopback
-and persists its named volume. `docker compose down` stops it without deleting data.
-Changing `.env` does not rotate existing PostgreSQL passwords. Use administration
-commands for role changes. For an existing database, configure its host/port and
-credentials instead of starting Compose. Future containers will use host `postgres`.
-
-Phases 1–5 are complete for the bounded local college demonstration.
-No ML or prediction is included.
-
-- [Implementation plan](docs/implementation_plan.md)
-- [Source contract](docs/source_contract.md)
-- [ETL operations and recovery](docs/etl_operations.md)
-- [Phase 1 report](docs/phase1_report.md)
-- [Phase 2 report](docs/phase2_report.md)
-
-- [Database schema and operations](docs/database.md)
-- [Phase 3 report](docs/phase3_report.md)
-
-## Phase 4 Airflow
-
-The pinned Linux Airflow 3.3.2 runtime uses LocalExecutor and its own PostgreSQL
-metadata DB. The application DB stays on localhost:55432. The UI is available at
-http://localhost:18080 (admin; password is AIRFLOW_ADMIN_PASSWORD in local .env).
-
+#### Option A: Run Directly on Host (Fastest)
 ```powershell
-.\.venv\Scripts\python scripts/setup_airflow.py
-.\.venv\Scripts\python -m quaketrack.cli migrate
-docker compose --profile airflow build airflow
-docker compose --profile airflow up -d airflow
-# Keep the DAG paused. Do not enable recurring ingestion without explicit approval.
-# Stop Airflow services without deleting any volumes or stopping the app DB:
-docker compose --profile airflow stop airflow airflow-db
+# Create the read-only dashboard role
+.\.venv\Scripts\python scripts/setup_dashboard.py
+
+# Launch Streamlit
+.\.venv\Scripts\python -m streamlit run dashboard/app.py
 ```
+Open your browser at **[http://localhost:8501](http://localhost:8501)**.
 
-The DAG is left paused after verification; its hourly schedule is configured.
-catchup=False prevents historical scheduler backfill. First automatic coverage is
-6 hours, followed by a configurable overlap up to 72 hours and bounded catch-up.
-Only successful PostgreSQL loading PLUS post-load quality advances pipeline_state.
-Manual historical test windows do not change automatic coverage. Failure simulation
-is disabled. Do not delete existing database volumes.
-
-See [Airflow operations](docs/airflow.md) for bounded manual triggering, task logs,
-retries, restart safety, all settings and troubleshooting. Six real DAG runs succeeded;
-one controlled quality failure recovered on its second attempt without refetching.
-Three current real events were inserted, bringing the total to 40; the original
-37 were unchanged. Application tests passed 125 cases plus 3 real DAG checks.
-
-- [Phase 4 report](docs/phase4_report.md)
-
-## Phase 5 dashboard and local deployment
-
-Open [QuakeTrack](http://localhost:8501) and [Airflow](http://localhost:18080).
-The application database remains PostgreSQL on `localhost:55432`. Docker Desktop
-must use Linux containers. Preserve the existing `.env` and named volumes.
-
-After the environment setup above, start the complete local demo:
-
+#### Option B: Run in Docker
 ```powershell
-docker compose up -d --wait postgres
-.\.venv\Scripts\python -m quaketrack.cli migrate
-.\.venv\Scripts\python scripts/setup_airflow.py
-docker compose --profile airflow build airflow
-docker compose --profile airflow up -d --wait airflow
+# Build and launch the containerized dashboard
 .\.venv\Scripts\python scripts/setup_dashboard.py
 docker compose --profile dashboard build dashboard
 docker compose --profile dashboard up -d --wait dashboard
 ```
+Open your browser at **[http://localhost:8501](http://localhost:8501)**.
 
-The dashboard profile does not start Airflow. Airflow has its own metadata database;
-earthquakes and application monitoring remain in the original application database.
-The DAG remains **paused**; no recurring ingestion is enabled by these instructions
-on this verified checkout. A fresh DAG is created paused. An existing installation
-retains its saved pause state, so inspect it in Airflow before a demonstration.
+---
 
-For development, run Streamlit directly on Windows instead of the dashboard container:
+### 5. Run Airflow Orchestration (Optional Profile)
+
+To inspect or run scheduled incremental ingestion through Apache Airflow:
 
 ```powershell
-docker compose --profile dashboard stop dashboard
-.\.venv\Scripts\python -m streamlit run dashboard/app.py
+# 1. Initialize Airflow credentials and connection configuration
+.\.venv\Scripts\python scripts/setup_airflow.py
+
+# 2. Build and launch Airflow and its metadata database
+docker compose --profile airflow build airflow
+docker compose --profile airflow up -d --wait airflow
 ```
 
-Do not run both on port 8501. If another application occupies it, pass
-`--server.port=8502` to Python or set `STREAMLIT_PORT=8502` in `.env` for Docker.
-Airflow admin credentials stay in the local `.env`; the dashboard does not receive them.
-The dashboard container is built from source, so rebuild it after code changes.
+- Open the Airflow Web UI at **[http://localhost:18080](http://localhost:18080)**.
+- **Username**: `admin`
+- **Password**: The `AIRFLOW_ADMIN_PASSWORD` generated in your `.env`.
+- The DAG `earthquake_ingestion_dag` is created **paused** by default. Unpause it in the UI or trigger a manual run to test incremental updates.
 
-Navigation includes Overview, Earthquake Map, Trends, Explorer, and Pipeline
-Monitoring. Shared date, magnitude, depth and literal location filters run in SQL.
-Both date inputs are inclusive UTC dates; the SQL end is the next midnight,
-exclusive. Numeric bounds are inclusive. Unknown magnitude/depth are included
-by default, even with active bounds; uncheck the explicit option to require both
-measurements. Valid negative measurements are preserved. Location is free text,
-not a country assignment. Explorer offers deterministic sorting, pages of
-25/50/100 rows, and a UTF-8 CSV of every matching row up to 10,000 events.
-Selections above that limit must be narrowed before export. Map and scatter
-use the newest 5,000 matches with visible limits. Server-side frequency and
-adaptive histograms aggregate all matches, including an unknown bin.
+To stop Airflow without removing database volumes:
+```powershell
+docker compose --profile airflow stop airflow airflow-db
+```
 
-Connections reuse Phase 1 host/database settings and a managed SQLAlchemy pool.
-Dashboard credentials are separate `DASHBOARD_DB_USER` / `DASHBOARD_DB_PASSWORD`
-values: there is no fallback to ETL credentials. The dedicated role has SELECT
-permissions only on required tables/views or columns, without superuser flags,
-ownership or memberships. Writes are denied even when transaction read-only mode
-is disabled in verification. Connections also default to read-only transactions,
-and each query explicitly starts read-only. No startup migrations or
-ingestion are performed. Query results expire after 60 seconds; Refresh data
-clears them immediately. Credentials are never rendered. Friendly DB failure and
-empty-selection states never substitute sample data. Map tiles need internet.
+---
 
-Operational history comes from `pipeline_health`, `ingestion_runs` and
-`pipeline_state`; it is global rather than earthquake-filtered. Workflow parents
-and child persistence loads are separate. Database history cannot establish live
-scheduler status; the page says so and links to Airflow. Event/source-update age,
-record-ingestion age, successful-workflow age and checkpoint lag have distinct
-meanings. An unchanged replay does not rewrite an event's ingestion timestamp.
+### 6. Run PySpark Syllabus Demo (Optional Profile)
 
-The verified database contains **40 real events on two dates**, October 1 and 25,
-2026, from requests with magnitude thresholds 4 and 5. It is sufficient for a
-functional demo, not a complete history or reliable frequency inference. Blank
-periods do not establish zero earthquakes. See the report for a proposed 30-day
-dataset; it has **not** been ingested.
-
-Verification commands:
+To run the PySpark big data transformation and Gold view parity verification in an isolated Docker container:
 
 ```powershell
-.\.venv\Scripts\python -m pytest --database-tests -q --basetemp=.pytest_tmp/final-check
+# 1. Generate the Silver JSON snapshot and quality contract report
+.\.venv\Scripts\python -m quaketrack.phase6 --verify-archives
+
+# 2. Build and run the PySpark container
+docker compose --profile spark build spark
+docker compose --profile spark run --rm spark
+
+# 3. Run PySpark unit tests inside the container
+docker compose --profile spark run --rm spark python -m pytest tests/spark -q -p no:cacheprovider
+```
+
+---
+
+## 7. CLI Reference & Operations Cheatsheet
+
+The `quaketrack` CLI provides full control over migrations, ETL, offline replay, and analytical queries:
+
+```powershell
+# Show help and available commands
+.\.venv\Scripts\python -m quaketrack.cli --help
+
+# 1. Database Migrations
+.\.venv\Scripts\python -m quaketrack.cli migrate
+
+# 2. Historical Backfill
+.\.venv\Scripts\python -m quaketrack.cli backfill --start 2026-10-01 --end 2026-10-03 --min-magnitude 4.0 --load-database
+
+# 3. Load Previously Staged Artifacts into PostgreSQL
+.\.venv\Scripts\python -m quaketrack.cli load-staging --staging-dir data/staging/demo --resume
+
+# 4. Offline Replay (Rebuild PostgreSQL directly from Bronze archives with NO network calls)
+.\.venv\Scripts\python -m quaketrack.cli replay --staging-dir data/staging/demo
+
+# 5. Run Parameterized Analytical Queries via CLI
+.\.venv\Scripts\python -m quaketrack.cli analytics overview --start 2026-10-01 --end 2026-10-02
+.\.venv\Scripts\python -m quaketrack.cli analytics daily_counts --start 2026-10-01 --end 2026-10-03
+.\.venv\Scripts\python -m quaketrack.cli analytics strongest_events --start 2026-10-01 --end 2026-10-03 --limit 5
+```
+
+---
+
+## 8. Testing & Quality Verification
+
+QuakeTrack features a multi-tiered test suite covering unit logic, isolated database integration, Airflow DAG integrity, and Streamlit UI flows.
+
+```powershell
+# 1. Run offline unit tests (transforms, normalizers, validators, windowing, deduplication)
+New-Item -ItemType Directory -Force .pytest_tmp | Out-Null
+.\.venv\Scripts\python -m pytest -q --basetemp=.pytest_tmp/local-check
+
+# 2. Run isolated database integration tests
+# (Automatically provisions and tears down an isolated temporary database quaketrack_test_<uuid>)
+.\.venv\Scripts\python -m pytest --database-tests -q --basetemp=.pytest_tmp/db-check
+
+# 3. Check Python dependency compatibility
 .\.venv\Scripts\python -m pip check
+
+# 4. Test Airflow DAG structure and task graph
 docker compose exec -T airflow python /workspace/scripts/verify_airflow_dag.py
-# Explicitly executes one six-hour historical DAG run using LocalExecutor:
-docker compose exec -T airflow python /workspace/scripts/verify_phase5_airflow.py
-# This checkout already has a preservation snapshot from before Phase 5 verification:
+
+# 5. Run comprehensive dashboard automated AppTest suite
 .\.venv\Scripts\python scripts/verify_dashboard.py
 ```
 
-`--database-tests` creates a fresh `quaketrack_test_<uuid>` database and only resets
-synthetic fixtures there. It requires CREATEDB and leaves that test DB for inspection.
-The live verification script uses read-only connections, checks original event rows
-and archive hashes against ignored `data/staging/phase5/before.json`, opens all five
-pages with AppTest, checks real filters and CSV, and compares KPIs to existing SQL.
-For a fresh environment, capture `scripts/verify_dashboard.py --snapshot` before
-your own bounded verification. It refuses to overwrite a previous snapshot. A
-later legitimate source revision may change event rows and fail this strict
-preservation check; inspect that change rather than replacing evidence blindly.
+---
 
-Stop safely (no volumes are removed):
+## 9. Safe Shutdown & Maintenance
+
+To stop all running services without losing database records or pipeline state:
 
 ```powershell
+# Stop dashboard container
 docker compose --profile dashboard stop dashboard
+
+# Stop Airflow containers
 docker compose --profile airflow stop airflow airflow-db
+
+# Stop PostgreSQL
 docker compose stop postgres
 ```
 
-Stop a host Streamlit process with Ctrl+C. Never run `down -v` or delete raw
-archives. The original `requirements-lock.txt` remains the core dependency set;
-`requirements-dashboard-lock.txt` records the resolved Windows Python 3.14 demo
-environment. For that exact environment, install it with `pip install -r`, then
-install the local package using `pip install --no-deps -e .`. Docker resolves
-platform-specific transitive wheels from the pinned direct dependencies.
-
-- [Final report and verification evidence](docs/phase5_report.md)
-- [4–5 minute demonstration](docs/DEMO_GUIDE.md)
-- [Viva questions and answers](docs/VIVA_QA.md)
-
-## Phase 6: syllabus demonstrations
-
-The existing `data/raw` files are **Bronze**; normalized staging and the current
-`earthquakes` table are **Silver**. Four ordinary SQL views are **Gold**:
-`gold_daily_earthquakes`, `gold_magnitude_distribution`, `gold_monthly_earthquakes`
-and `gold_depth_by_magnitude`. No files are moved or duplicated into new production
-layers. Views aggregate current earthquake-type rows; null measurements stay
-unknown, negative values remain valid, and all dates are UTC. This is a logical
-medallion layout, not Delta Lake, Iceberg or Hudi.
-
-For an existing checkout, apply the additive migration and configure the reader:
-
-```powershell
-docker compose up -d --wait postgres
-.\.venv\Scripts\python -m quaketrack.cli migrate
-.\.venv\Scripts\python scripts/setup_dashboard.py
-docker compose --profile dashboard build dashboard
-docker compose --profile dashboard up -d --wait dashboard
-```
-
-`setup_dashboard.py` creates `quaketrack_dashboard` with a generated password in
-ignored `.env`, or reuses its existing credentials without rotation. It grants only
-the required reads, omits sensitive audit columns, and refuses an existing powerful
-role rather than revoking privileges. ETL/Airflow continue to use `POSTGRES_USER` /
-`POSTGRES_PASSWORD`; Streamlit receives only `DASHBOARD_DB_USER` /
-`DASHBOARD_DB_PASSWORD`. Run setup again after reviewed migrations add a view the
-reader needs. New views are not granted automatically. Default PostgreSQL PUBLIC
-temporary-table privileges are not revoked; permanent project tables remain
-protected by ACLs. The existing bootstrap ETL role was not demoted or changed.
-
-The formal contract is `contracts/earthquake.v1.json`. It describes all 18
-normalized fields, source revisions, UTC/millisecond timestamps, optional values,
-uniqueness and provenance. Validation reuses existing domain functions. Processed
-numeric strings fail this contract even though raw-source normalization can convert
-them. The report denominator is every **processed Silver row supplied**, including
-duplicates, rather than every raw API feature fetched. All rows in a duplicate-ID
-group fail dataset uniqueness; an empty input has no compliance percentage.
-
-Generate a bounded, read-only Silver snapshot, SQL references and quality report:
-
-```powershell
-.\.venv\Scripts\python -m quaketrack.phase6 --verify-archives
-```
-
-The verified checkout already has these files under `data/staging/phase6/demo/`.
-The command refuses to overwrite them. For a later independent snapshot, pass a
-fresh `--output-dir`, such as `data/staging/phase6/demo-next`; Spark can read it using
-a matching bind mount. No earthquake rows or ingestion checkpoints are changed.
-The optional artifact is capped at 10,000 records. Silver and Gold are exported
-within the same repeatable-read transaction, so the parity denominator is identical.
-`--verify-archives` checks every local response checksum and verifies that each
-Silver row matches a valid normalized archived representation. It requires the
-local ignored source archive files; a fresh clone must ingest a small sample first.
-
-Optional Spark runs on Python 3.12 + OpenJDK 17 in Docker, using pinned
-**PySpark 4.1.3**, `local[2]`, UTC, two shuffle partitions and no exposed Spark UI.
-Java was absent from this Windows PATH; Docker supplies it without a host install.
-Neither normal ingestion nor dashboard startup installs or imports PySpark.
-
-```powershell
-docker compose --profile spark build spark
-docker compose --profile spark run --rm spark
-docker compose --profile spark run --rm spark python -m pytest tests/spark -q -p no:cacheprovider
-```
-
-The Spark job reads `/inputs/silver-snapshot.json` from the default demo mount,
-creates an explicit typed DataFrame, demonstrates `select`, `filter`, `withColumn`,
-`groupBy`, aggregates and Spark SQL, and compares four outputs to PostgreSQL.
-It writes a new `run-<uuid>/spark-report.json` under `data/staging/phase6/spark`.
-Each run preserves older reports. Collect/count are actions; the transformations
-build lazy plans. The container receives **no database or Airflow credentials**.
-This is single-machine teaching code, not a cluster or a performance improvement
-over PostgreSQL for 40 rows. The first image build downloads Java/Spark and takes
-several minutes; repeated executions reuse it. The native-Hadoop warning can occur
-for this local job; no Hadoop service or cluster is deployed.
-
-To use a fresh snapshot directory without editing Compose:
-
-```powershell
-docker compose --profile spark run --rm -v "${PWD}/data/staging/phase6/demo-next:/inputs:ro" spark
-```
-
-After the initial snapshot and Spark run, verify preservation, live Gold parity,
-real reader INSERT/UPDATE/DELETE denial, ETL privileges and the paused DAG:
-
-```powershell
-.\.venv\Scripts\python scripts/verify_phase6.py
-.\.venv\Scripts\python scripts/verify_dashboard.py
-.\.venv\Scripts\python -m pytest --database-tests -q --basetemp=.pytest_tmp/phase6-check
-docker compose exec -T airflow python /workspace/scripts/verify_airflow_dag.py
-```
-
-The Phase 6 verifier expects this checkout's ignored `before.json` preservation
-manifest and default `demo` snapshot. It is a local evidence checker, not a required
-startup step in fresh clones. Normal host pytest skips the optional Spark module;
-the five actual Spark tests run in its separate container. DB tests create a new
-isolated database and reader role, retained for inspection. No production rows are
-modified by tests. See the report for exact results and limits.
-
-- [Phase 6 implementation and verification](docs/phase6_report.md)
-- [Syllabus mapping](docs/SYLLABUS_MAPPING.md)
-
-## Phase 7: expanded history and redesigned dashboard
-
-The approved 90-day backfill loaded **3,951 source observations** for
-`[2026-07-27, 2026-10-25)` UTC at magnitude ≥4.0. It inserted **3,914** events and
-left 37 overlapping events unchanged, bringing the database to **3,954** events
-across **91 event dates**. The three original October 25 observations remain
-outside the approved 90 complete days. All 40 original complete rows and all
-48 original raw files are preserved. No additional day was silently added when
-work resumed on October 26. Airflow remains paused on port 18080.
-
-The navy/teal interface includes responsive KPI cards, compact filters with Reset
-and Refresh, balanced Plotly panels, a compact recent-events table, optional
-technical Explorer columns, pagination and lossless filtered CSV. The Map page
-has a source-event inspector and an **Offline coordinate view** toggle. That
-fallback uses longitude/latitude axes without any external map tiles. Coordinate
-density cells are labeled by degrees; no countries are inferred from place text.
-
-Coverage comes from successful PostgreSQL chunk metadata, merged separately by
-source magnitude threshold. It distinguishes event dates from fully loaded UTC
-days. Histograms/counts use all selected rows; map/scatter remain capped at 5,000.
-Missing periods are not automatically filled with zeros. Amber timeline bars mark
-partial calendar periods or unverified coverage at the source threshold. Monitoring distinguishes
-current SQL metadata from dated archive/contract/Spark verification evidence,
-and shows whether the recorded dataset summary still matches current data.
-
-Update an existing deployment after pulling these changes:
-
-```powershell
-.\.venv\Scripts\python scripts/setup_dashboard.py
-docker compose --profile dashboard build dashboard
-docker compose --profile dashboard up -d --wait dashboard
-```
-
-The setup adds only SELECT access to chunk IDs, successful chunk windows/status
-and the raw archive chunk link. These non-sensitive fields are necessary to verify
-coverage; archive paths, quarantine and error details remain unreadable. No write
-permissions or password changes are introduced. The dashboard receives the small
-validation summary through a read-only bind mount, not raw archives or ETL secrets.
-
-The new **opt-in** `--preserve-existing` backfill option keeps existing PostgreSQL
-rows unchanged even when a newer source revision arrives. It applies when used
-with `--load-database`; normal ingestion retains its original revision-aware upsert
-policy. The approved run used this flag to respect preservation of the original
-40 rows. Its `unchanged` counter describes unchanged database rows; it does not
-prove every incoming representation had an identical source revision.
-
-Full results and source counts are in [the Phase 7 report](docs/phase7_report.md)
-and [the reviewed preflight](docs/phase7_preflight.md). The completed run has a
-fresh staging directory at `data/staging/phase7-90d-mag4`. To check resume of that
-already approved range without refetching successful windows:
-
-```powershell
-.\.venv\Scripts\python -m quaketrack.cli backfill --start 2026-07-27 --end 2026-10-25 --min-magnitude 4 --window-days 1 --max-windows 90 --output-dir data/staging/phase7-90d-mag4 --load-database --preserve-existing --resume
-```
-
-The job logs separate staging inserts from PostgreSQL inserts. A separate repeat
-of July 27 fetched 60 observations and reported all 60 unchanged in PostgreSQL.
-Do not delete named volumes or source archives to repeat a demonstration.
-
-Verification with the current expanded snapshot:
-
-```powershell
-.\.venv\Scripts\python scripts/verify_phase7.py
-.\.venv\Scripts\python -m pytest --database-tests -q --basetemp=.pytest_tmp/phase7-check
-docker compose exec -T airflow python /workspace/scripts/verify_airflow_dag.py
-docker compose --profile spark run --rm spark python -m pytest tests/spark -q -p no:cacheprovider
-docker compose --profile spark run --rm -v "${PWD}/data/staging/phase7/demo:/inputs:ro" -v "${PWD}/data/staging/phase7/spark:/outputs" spark
-```
-
-Phase 6's 40-row snapshot/report remains historical evidence. Use the Phase 7
-snapshot and verifier for current Spark parity; the old strict Phase 6 point-in-time
-verifier deliberately detects dataset expansion rather than silently treating an
-old snapshot as current. Phase 7 evidence is local and ignored under
-`data/staging/phase7`; fresh clones need their own approved ingestion and snapshot.
-To prepare a new independent snapshot without overwriting evidence, run
-`python -m quaketrack.phase6 --output-dir <fresh-directory> --verify-archives`
-with the venv Python and bind that directory to Spark's `/inputs`.
-
-Phase 7 publication was subsequently authorized by the user. Services retain ports
-55432/18080/8501. If Docker Desktop is stopped, run `docker desktop start`, then
-the normal Compose startup commands; existing named volumes restore the data.
+> [!CAUTION]
+> **Never run `docker compose down -v`** unless you explicitly intend to delete all stored database volumes (`postgres_data`, `airflow_metadata`, `airflow_home`).
